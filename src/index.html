@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09111f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Speaker Measure Pro">
+  <title>Speaker Measure Pro</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css?v=3.2.0">
+  <script src="dsp-core.js?v=3.2.0"></script>
+</head>
+<body>
+  <audio id="outputAudio" class="output-audio" playsinline preload="auto" aria-hidden="true"></audio>
+
+  <header>
+    <div>
+      <p class="eyebrow">Speaker acoustic measurement</p>
+      <h1>Speaker Measure <span>Pro</span></h1>
+      <p class="lead">開始・終了チャープで音声出力経路の遅延とクロック差を補正し、デコンボリューションから周波数特性、位相、インパルス応答、参考THDを算出します。</p>
+    </div>
+    <div class="header-badges">
+      <span id="secureBadge" class="badge">環境確認中</span>
+      <span class="badge version">v3.2.0</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel setup-panel">
+      <div class="section-heading">
+        <div>
+          <h2>1. 測定条件</h2>
+          <p>自作バスレフ・測定距離10cmを初期値にしています。</p>
+        </div>
+        <span class="method-badge">ESS + deconvolution</span>
+      </div>
+
+      <div class="form-grid">
+        <label>開始周波数
+          <span><input id="startFreq" type="number" min="20" max="1000" step="1" value="20"> Hz</span>
+        </label>
+        <label>終了周波数
+          <span><input id="endFreq" type="number" min="1000" max="22000" step="100" value="20000"> Hz</span>
+        </label>
+        <label>スイープ時間
+          <span><input id="duration" type="number" min="4" max="15" step="1" value="10"> 秒</span>
+        </label>
+        <label>出力レベル
+          <span><input id="level" type="range" min="0.05" max="0.65" step="0.01" value="0.22"><output id="levelOut">22%</output></span>
+        </label>
+        <label>平滑化
+          <select id="smoothing">
+            <option value="0">なし</option>
+            <option value="24">1/24 octave</option>
+            <option value="12" selected>1/12 octave</option>
+            <option value="6">1/6 octave</option>
+            <option value="3">1/3 octave</option>
+          </select>
+        </label>
+        <label>時間窓（直接音以降）
+          <select id="gateMs">
+            <option value="full" selected>全残響（低域測定向け）</option>
+            <option value="500">500 ms</option>
+            <option value="250">250 ms</option>
+            <option value="100">100 ms</option>
+            <option value="50">50 ms</option>
+            <option value="20">20 ms</option>
+          </select>
+        </label>
+        <label>測定距離
+          <span><input id="distanceCm" type="number" min="1" max="1000" step="1" value="10"> cm</span>
+        </label>
+        <label>スピーカー種別
+          <select id="speakerType">
+            <option value="bass-reflex" selected>自作バスレフ</option>
+            <option value="sealed">密閉型</option>
+            <option value="transmission-line">TL / MTL</option>
+            <option value="open-baffle">平面バッフル</option>
+            <option value="commercial">市販スピーカー</option>
+            <option value="other">その他</option>
+          </select>
+        </label>
+        <label>測定名
+          <input id="measurementName" type="text" maxlength="80" placeholder="例：2inch BR / port 90mm">
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>高度な設定</summary>
+        <div class="form-grid advanced-grid">
+          <label>正則化
+            <select id="regularizationDb">
+              <option value="-80">−80 dB（安定優先）</option>
+              <option value="-90">−90 dB</option>
+              <option value="-100" selected>−100 dB（標準）</option>
+              <option value="-110">−110 dB（精度優先）</option>
+            </select>
+          </label>
+          <label>正規化
+            <select id="normalizeMode">
+              <option value="on" selected>500 Hz～2 kHz平均を0 dB</option>
+              <option value="off">正規化しない</option>
+            </select>
+          </label>
+          <label>表示レンジ
+            <select id="magnitudeRange">
+              <option value="36">+12 ～ −24 dB</option>
+              <option value="54" selected>+18 ～ −36 dB</option>
+              <option value="72">+24 ～ −48 dB</option>
+            </select>
+          </label>
+        </div>
+      </details>
+
+      <div class="calibration-row">
+        <div>
+          <strong>マイク校正</strong>
+          <span id="calibrationStatus">未適用</span>
+        </div>
+        <label class="file-button">校正CSVを選択<input id="calibrationFile" type="file" accept=".csv,.txt,text/csv,text/plain"></label>
+        <button id="clearCalibrationBtn" type="button" disabled>解除</button>
+      </div>
+
+      <div class="button-row">
+        <button id="prepareBtn" class="primary">マイクを準備</button>
+        <button id="testBtn">テスト音</button>
+        <button id="markerBtn">マーカー確認</button>
+        <button id="measureBtn" class="accent" disabled>本測定を開始</button>
+        <button id="abortBtn" class="danger" disabled>中止</button>
+      </div>
+      <p class="hint">測定音は「開始チャープ → ログスイープ → 残響収録 → 終了チャープ」です。終了チャープは録音クロック差の推定にも使用します。</p>
+    </section>
+
+    <section class="panel status-panel">
+      <div class="section-heading">
+        <div>
+          <h2>2. 測定状態</h2>
+          <p>入力処理、同期品質、クリッピングを監視します。</p>
+        </div>
+        <span id="qualityBadge" class="quality-badge neutral">待機中</span>
+      </div>
+      <div id="status" class="status" aria-live="polite">スピーカーを接続し、「テスト音」を押してください。</div>
+      <div class="progress-track" aria-label="解析進捗"><div id="progressBar" class="progress-bar"></div></div>
+      <div class="meter-wrap" aria-label="マイク入力レベル"><div id="meter" class="meter"></div></div>
+      <dl id="deviceInfo" class="device-info">
+        <div><dt>Sample rate</dt><dd>—</dd></div>
+        <div><dt>Echo cancellation</dt><dd>—</dd></div>
+        <div><dt>Noise suppression</dt><dd>—</dd></div>
+        <div><dt>Auto gain control</dt><dd>—</dd></div>
+        <div><dt>AudioContext</dt><dd>—</dd></div>
+        <div><dt>Audio session</dt><dd>—</dd></div>
+        <div><dt>Output</dt><dd>—</dd></div>
+        <div><dt>Content hint</dt><dd>—</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel graph-panel">
+      <div class="section-heading graph-heading">
+        <div>
+          <h2>3. 解析結果</h2>
+          <p id="graphSubtitle">相対周波数特性</p>
+        </div>
+        <div class="button-row compact export-buttons">
+          <button id="saveBtn" disabled>測定保存</button>
+          <button id="graphPngBtn" disabled>グラフ画像</button>
+          <button id="csvBtn" disabled>解析CSV</button>
+          <button id="jsonBtn" disabled>JSON</button>
+          <button id="wavBtn" disabled>録音WAV</button>
+        </div>
+      </div>
+
+      <div class="view-tabs" role="tablist" aria-label="グラフ表示">
+        <button class="view-tab active" data-view="magnitude" role="tab">周波数特性</button>
+        <button class="view-tab" data-view="phase" role="tab">位相</button>
+        <button class="view-tab" data-view="impulse" role="tab">インパルス / ETC</button>
+        <button class="view-tab" data-view="thd" role="tab">参考THD</button>
+      </div>
+
+      <div class="reference-row">
+        <label>差分基準
+          <select id="referenceSelect"><option value="">なし</option></select>
+        </label>
+        <span>周波数特性表示時のみ、選択測定を差し引きます。</span>
+      </div>
+
+      <div class="canvas-wrap"><canvas id="responseCanvas"></canvas></div>
+      <div id="legend" class="legend"></div>
+      <div id="resultSummary" class="summary">まだ測定結果がありません。</div>
+    </section>
+
+    <section class="panel saved-panel">
+      <div class="section-heading">
+        <div>
+          <h2>保存した測定</h2>
+          <p>チェックした測定を重ねて比較できます。データは端末内のIndexedDBに保存します。</p>
+        </div>
+        <button id="deleteAllBtn" class="danger-ghost">全削除</button>
+      </div>
+      <div id="savedList" class="saved-list"></div>
+    </section>
+
+    <section class="panel notes-panel">
+      <h2>バスレフを10cmで測る場合の注意</h2>
+      <ul>
+        <li>10cm測定は室内反射を抑えやすく、試作差の比較に適していますが、ドライバーとポートの距離差により低域の合成値は測定位置で変化します。</li>
+        <li>最低域を評価するときは「全残響」または500msを使用してください。短い時間窓では低域分解能が不足します。</li>
+        <li>ポート同調の詳細評価では、ドライバー近傍とポート近傍を別々に測定し、面積と距離を考慮して合成する方法がより適切です。</li>
+        <li>結果には音声出力経路、アンプ、スピーカー、iPhoneマイク、室内音響の特性が含まれます。絶対SPLではなく、同一条件の相対比較を主用途としてください。</li>
+        <li>参考THDはログスイープ追従解析による概算です。規格準拠の歪率測定値ではありません。</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>Speaker Measure Pro 3.2 — local-first / no upload</footer>
+  <script type="module" src="app.js?v=3.2.0"></script>
+</body>
+</html>
