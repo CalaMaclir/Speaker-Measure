@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Speaker Measure Pro">
   <title>Speaker Measure Pro</title>
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=3.2.0">
-  <script src="dsp-core.js?v=3.2.0"></script>
+  <link rel="stylesheet" href="styles.css?v=3.3.0">
+  <script src="dsp-core.js?v=3.3.0"></script>
 </head>
 <body>
   <audio id="outputAudio" class="output-audio" playsinline preload="auto" aria-hidden="true"></audio>
@@ -23,7 +23,7 @@
     </div>
     <div class="header-badges">
       <span id="secureBadge" class="badge">環境確認中</span>
-      <span class="badge version">v3.2.0</span>
+      <span class="badge version">v3.3.0</span>
     </div>
   </header>
 
@@ -142,8 +142,31 @@
         <span id="qualityBadge" class="quality-badge neutral">待機中</span>
       </div>
       <div id="status" class="status" aria-live="polite">スピーカーを接続し、「テスト音」を押してください。</div>
-      <div class="progress-track" aria-label="解析進捗"><div id="progressBar" class="progress-bar"></div></div>
-      <div class="meter-wrap" aria-label="マイク入力レベル"><div id="meter" class="meter"></div></div>
+
+      <div class="monitor-grid">
+        <div class="monitor-block">
+          <div class="monitor-label">
+            <strong>測定・解析の進行状況</strong>
+            <output id="progressText">待機中</output>
+          </div>
+          <div id="progressTrack" class="progress-track" role="progressbar" aria-label="測定・解析の進行状況" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <p class="monitor-help">上のバーは処理の進捗です。音量表示ではありません。</p>
+        </div>
+
+        <div class="monitor-block">
+          <div class="monitor-label">
+            <strong>マイク入力レベル</strong>
+            <output id="meterText">マイク未準備</output>
+          </div>
+          <div id="meterTrack" class="meter-wrap" role="meter" aria-label="マイク入力レベル" aria-valuemin="-60" aria-valuemax="0" aria-valuetext="マイク未準備">
+            <div id="meter" class="meter"></div>
+          </div>
+          <div class="meter-scale" aria-hidden="true"><span>−60 dBFS</span><span>−30</span><span>−12</span><span>0</span></div>
+          <p class="monitor-help">下のバーはマイクが実際に感知した音量です。黄色から赤は入力過大の目安です。</p>
+        </div>
+      </div>
       <dl id="deviceInfo" class="device-info">
         <div><dt>Sample rate</dt><dd>—</dd></div>
         <div><dt>Echo cancellation</dt><dd>—</dd></div>
@@ -213,7 +236,7 @@
     </section>
   </main>
 
-  <footer>Speaker Measure Pro 3.2 — local-first / no upload</footer>
-  <script type="module" src="app.js?v=3.2.0"></script>
+  <footer>Speaker Measure Pro 3.3 — local-first / no upload</footer>
+  <script type="module" src="app.js?v=3.3.0"></script>
 </body>
 </html>

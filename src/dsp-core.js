@@ -664,7 +664,7 @@
 
     progress(0.96, '測定品質を評価しています…');
     return {
-      version: '3.2.0',
+      version: '3.3.0',
       sampleRate,
       magnitude: response.magnitude,
       phase: response.phase,

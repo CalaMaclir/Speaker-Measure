@@ -1,4 +1,4 @@
-const VERSION = '3.2.0';
+const VERSION = '3.3.0';
 const DB_NAME = 'speaker-measure-pro';
 const DB_VERSION = 1;
 const STORE_NAME = 'measurements';
@@ -19,7 +19,8 @@ const ui = {
   regularizationDb: $('regularizationDb'), normalizeMode: $('normalizeMode'), magnitudeRange: $('magnitudeRange'),
   calibrationFile: $('calibrationFile'), calibrationStatus: $('calibrationStatus'), clearCalibrationBtn: $('clearCalibrationBtn'),
   prepareBtn: $('prepareBtn'), testBtn: $('testBtn'), markerBtn: $('markerBtn'), measureBtn: $('measureBtn'), abortBtn: $('abortBtn'),
-  status: $('status'), progressBar: $('progressBar'), meter: $('meter'), qualityBadge: $('qualityBadge'), deviceInfo: $('deviceInfo'),
+  status: $('status'), progressTrack: $('progressTrack'), progressBar: $('progressBar'), progressText: $('progressText'),
+  meterTrack: $('meterTrack'), meter: $('meter'), meterText: $('meterText'), qualityBadge: $('qualityBadge'), deviceInfo: $('deviceInfo'),
   outputAudio: $('outputAudio'), canvas: $('responseCanvas'), graphSubtitle: $('graphSubtitle'), legend: $('legend'), summary: $('resultSummary'),
   saveBtn: $('saveBtn'), graphPngBtn: $('graphPngBtn'), csvBtn: $('csvBtn'), jsonBtn: $('jsonBtn'), wavBtn: $('wavBtn'),
   referenceSelect: $('referenceSelect'), savedList: $('savedList'), deleteAllBtn: $('deleteAllBtn')
@@ -67,7 +68,7 @@ async function init() {
   renderSaved();
   refreshReferenceOptions();
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('./sw.js?v=3.2.0').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=3.3.0').catch(() => {});
   }
 }
 
@@ -209,11 +210,22 @@ function startMeter() {
       peak = Math.max(peak, Math.abs(value));
     }
     const level = Math.sqrt(sum / values.length);
-    const normalized = Math.max(0, Math.min(1, (20 * Math.log10(Math.max(level, 1e-6)) + 60) / 60));
-    ui.meter.style.width = `${Math.max(normalized * 100, peak * 100)}%`;
+    const rmsDb = 20 * Math.log10(Math.max(level, 1e-6));
+    const peakDb = 20 * Math.log10(Math.max(peak, 1e-6));
+    const displayDb = Math.max(rmsDb, peakDb);
+    const normalized = Math.max(0, Math.min(1, (displayDb + 60) / 60));
+    ui.meter.style.width = `${normalized * 100}%`;
+    ui.meterText.value = `RMS ${formatMeterDb(rmsDb)} / Peak ${formatMeterDb(peakDb)}`;
+    ui.meterTrack.setAttribute('aria-valuenow', String(Math.max(-60, Math.min(0, peakDb)).toFixed(1)));
+    ui.meterTrack.setAttribute('aria-valuetext', `RMS ${formatMeterDb(rmsDb)}、ピーク ${formatMeterDb(peakDb)}`);
     meterFrame = requestAnimationFrame(tick);
   };
   tick();
+}
+
+function formatMeterDb(value) {
+  if (!Number.isFinite(value) || value <= -60) return '−60以下 dBFS';
+  return `${value.toFixed(1).replace('-', '−')} dBFS`;
 }
 
 function generateTone(sampleRate, frequency = 1000, duration = 0.65, level = 0.18) {
@@ -308,7 +320,7 @@ async function measure() {
   recordingChunks = [];
   updateResultButtons();
   setBusy(true, true);
-  setProgress(0.01);
+  setProgress(0.05, '録音・再生中');
   setAudioSessionType('playback');
   setStatus(`録音開始。開始マーカーの後、${currentConfig.sweepDuration}秒のスイープを再生します…`);
 
@@ -317,11 +329,13 @@ async function measure() {
     const playback = playPcmSamples(signal.samples, audioContext.sampleRate);
     await playback;
     if (abortRequested) throw new Error('測定を中止しました。');
+    setProgress(0.35, '録音確定中');
     setStatus('出力終了。録音を確定しています…');
     await sleep(180);
     await stopRecorder();
     lastRecording = mergeChunks(recordingChunks);
     if (lastRecording.length < audioContext.sampleRate) throw new Error('録音データが短すぎます。');
+    setProgress(0.40, '解析準備中');
     setStatus('録音完了。開始マーカーを基準に解析しています…');
     await analyzeRecording(lastRecording, audioContext.sampleRate, currentConfig);
   } catch (error) {
@@ -339,7 +353,7 @@ function analyzeRecording(recorded, sampleRate, config) {
     analysisWorker.onmessage = (event) => {
       const message = event.data;
       if (message.type === 'progress') {
-        setProgress(message.value);
+        setProgress(0.40 + message.value * 0.60, '解析中');
         setStatus(message.message);
       } else if (message.type === 'result') {
         currentResult = {
@@ -349,7 +363,7 @@ function analyzeRecording(recorded, sampleRate, config) {
           createdAt: new Date().toISOString(),
           config: { ...config, calibration: undefined }
         };
-        setProgress(1);
+        setProgress(1, '完了');
         setStatus('解析が完了しました。同期遅延、インパルス応答、周波数特性を確認してください。');
         renderSummary();
         updateQualityBadge();
@@ -381,7 +395,7 @@ function abortMeasurement() {
   analysisWorker = null;
   recorderNode?.port.postMessage({ type: 'stop' });
   setStatus('測定を中止しました。', true);
-  setProgress(0);
+  setProgress(0, '中止');
   setBusy(false, false);
 }
 
@@ -533,8 +547,13 @@ function setStatus(message, isError = false) {
   ui.status.classList.toggle('error', isError);
 }
 
-function setProgress(value) {
-  ui.progressBar.style.width = `${Math.max(0, Math.min(1, value)) * 100}%`;
+function setProgress(value, label = '') {
+  const normalized = Math.max(0, Math.min(1, value));
+  const percent = Math.round(normalized * 100);
+  ui.progressBar.style.width = `${percent}%`;
+  ui.progressText.value = label || (percent === 0 ? '待機中' : percent >= 100 ? '完了' : `${percent}%`);
+  ui.progressTrack.setAttribute('aria-valuenow', String(percent));
+  ui.progressTrack.setAttribute('aria-valuetext', `${ui.progressText.value}、${percent}%`);
 }
 
 function sleep(ms) {
