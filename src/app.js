@@ -1,4 +1,4 @@
-const VERSION = '4.0.1';
+const VERSION = '4.0.2';
 const DB_NAME = 'speaker-measure-pro';
 const DB_VERSION = 1;
 const STORE_NAME = 'measurements';
@@ -72,7 +72,7 @@ async function init() {
   renderSaved();
   refreshReferenceOptions();
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('./sw.js?v=4.0.1').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=4.0.2').catch(() => {});
   }
 }
 

@@ -1044,7 +1044,7 @@
       : null;
 
     return {
-      version: '4.0.1',
+      version: '4.0.2',
       sampleRate,
       magnitude: response.magnitude,
       phase: response.phase,

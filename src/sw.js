@@ -1,12 +1,12 @@
-const CACHE = 'speaker-measure-pro-v4-0-1';
+const CACHE = 'speaker-measure-pro-v4-0-2';
 const ASSETS = [
   './',
   './index.html',
-  './styles.css?v=4.0.1',
-  './dsp-core.js?v=4.0.1',
-  './app.js?v=4.0.1',
-  './recorder-worklet.js?v=4.0.1',
-  './analyzer-worker.js?v=4.0.1',
+  './styles.css?v=4.0.2',
+  './dsp-core.js?v=4.0.2',
+  './app.js?v=4.0.2',
+  './recorder-worklet.js?v=4.0.2',
+  './analyzer-worker.js?v=4.0.2',
   './manifest.webmanifest'
 ];
 

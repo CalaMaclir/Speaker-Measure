@@ -247,3 +247,46 @@ label span > output {
     max-width: 100%;
   }
 }
+
+/* v4.0.2: グラフ切替タブの文字・ボタン位置を固定 */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+.view-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 1px 10px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+.view-tab {
+  flex: 0 0 auto;
+  inline-size: max-content;
+  min-inline-size: max-content;
+  max-inline-size: none;
+  min-block-size: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  scroll-snap-align: start;
+}
+@media (max-width: 480px) {
+  .view-tabs {
+    margin-inline: -2px;
+    padding-inline: 2px;
+  }
+  .view-tab {
+    min-block-size: 42px;
+    padding: 8px 12px;
+    font-size: .88rem;
+  }
+}
