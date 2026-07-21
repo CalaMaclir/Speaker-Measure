@@ -1,7 +1,7 @@
 {
   "name": "Speaker Measure Pro",
   "short_name": "Measure Pro",
-  "description": "iPhoneとスピーカーで相対周波数特性、位相、インパルス応答、参考THDを測定するローカルWebアプリ",
+  "description": "スピーカーの周波数特性、位相、群遅延、時間応答、減衰、THDをマーカー同期で測定するローカルWebアプリ",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#050914",

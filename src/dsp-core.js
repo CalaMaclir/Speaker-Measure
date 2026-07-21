@@ -1,4 +1,4 @@
-/* Speaker Measure Pro DSP core - dependency free */
+/* Speaker Measure Pro 4.0 DSP core - dependency free */
 (function attachSpeakerDSP(root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -7,7 +7,8 @@
   'use strict';
 
   const TAU = Math.PI * 2;
-  const EPS = 1e-20;
+  const EPS = 1e-24;
+  const BARKER_7 = [1, 1, 1, -1, -1, 1, -1];
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -43,21 +44,26 @@
     return K * (Math.exp(time / L) - 1);
   }
 
-  function generateLogSweep(sampleRate, f0, f1, duration, level = 0.25, timeScale = 1) {
+  function raisedCosineIn(position) {
+    return 0.5 - 0.5 * Math.cos(Math.PI * clamp(position, 0, 1));
+  }
+
+  function generateLogSweep(sampleRate, f0, f1, duration, level = 0.25, timeScale = 1, options = {}) {
     if (!(sampleRate > 0 && f0 > 0 && f1 > f0 && duration > 0 && timeScale > 0)) {
       throw new Error('スイープ信号の設定値が不正です。');
     }
     const count = Math.max(1, Math.round(sampleRate * duration * timeScale));
     const output = new Float32Array(count);
-    const fadeSamples = Math.max(1, Math.round(sampleRate * 0.045 * timeScale));
+    const fadeInSeconds = Number(options.fadeInSeconds ?? 0.085);
+    const fadeOutSeconds = Number(options.fadeOutSeconds ?? 0.11);
+    const fadeIn = Math.max(1, Math.round(sampleRate * fadeInSeconds * timeScale));
+    const fadeOut = Math.max(1, Math.round(sampleRate * fadeOutSeconds * timeScale));
     for (let i = 0; i < count; i++) {
       const nominalTime = i / (sampleRate * timeScale);
-      let env = 1;
-      if (i < fadeSamples) env *= 0.5 - 0.5 * Math.cos(Math.PI * i / fadeSamples);
-      if (i >= count - fadeSamples) {
-        env *= 0.5 - 0.5 * Math.cos(Math.PI * (count - 1 - i) / fadeSamples);
-      }
-      output[i] = Math.sin(logSweepPhase(nominalTime, f0, f1, duration)) * level * env;
+      let envelope = 1;
+      if (i < fadeIn) envelope *= raisedCosineIn(i / fadeIn);
+      if (i >= count - fadeOut) envelope *= raisedCosineIn((count - 1 - i) / fadeOut);
+      output[i] = Math.sin(logSweepPhase(nominalTime, f0, f1, duration)) * level * envelope;
     }
     return output;
   }
@@ -65,76 +71,100 @@
   function fillLogChirp(target, offset, sampleRate, f0, f1, duration, level, polarity = 1) {
     const count = Math.min(target.length - offset, Math.round(sampleRate * duration));
     if (count <= 0) return 0;
-    const fade = Math.max(1, Math.round(sampleRate * 0.009));
+    const fade = Math.max(1, Math.round(sampleRate * Math.min(0.004, duration * 0.18)));
     const logRatio = Math.log(f1 / f0);
     const L = duration / logRatio;
     const K = TAU * f0 * L;
     for (let i = 0; i < count; i++) {
       const t = i / sampleRate;
-      let env = 1;
-      if (i < fade) env *= 0.5 - 0.5 * Math.cos(Math.PI * i / fade);
-      if (i >= count - fade) env *= 0.5 - 0.5 * Math.cos(Math.PI * (count - 1 - i) / fade);
-      target[offset + i] = polarity * level * env * Math.sin(K * (Math.exp(t / L) - 1));
+      let envelope = 1;
+      if (i < fade) envelope *= raisedCosineIn(i / fade);
+      if (i >= count - fade) envelope *= raisedCosineIn((count - 1 - i) / fade);
+      target[offset + i] = polarity * level * envelope * Math.sin(K * (Math.exp(t / L) - 1));
     }
     return count;
   }
 
-  function generateMarker(sampleRate, level = 0.32, variant = 'start') {
-    // Two asymmetric chirps make the marker resistant to music/noise false positives.
-    const chirpA = 0.105;
-    const gap = 0.026;
-    const chirpB = 0.105;
-    const total = chirpA + gap + chirpB;
-    const output = new Float32Array(Math.round(sampleRate * total));
-    const aCount = fillLogChirp(
-      output,
-      0,
-      sampleRate,
-      variant === 'start' ? 720 : 3450,
-      variant === 'start' ? 3450 : 880,
-      chirpA,
-      level,
-      1
-    );
-    const bOffset = aCount + Math.round(sampleRate * gap);
-    fillLogChirp(
-      output,
-      bOffset,
-      sampleRate,
-      variant === 'start' ? 3300 : 820,
-      variant === 'start' ? 910 : 3250,
-      chirpB,
-      level * 0.92,
-      variant === 'start' ? -1 : 1
-    );
+  function generateMarker(sampleRate, level = 0.30, variant = 'start') {
+    // Barker-coded chirp packets provide a sharp correlation peak while keeping
+    // marker energy well below the 20 kHz analysis edge.
+    const chipDuration = 0.025;
+    const chipGap = 0.003;
+    const chipSamples = Math.round(sampleRate * chipDuration);
+    const gapSamples = Math.round(sampleRate * chipGap);
+    const total = BARKER_7.length * chipSamples + (BARKER_7.length - 1) * gapSamples;
+    const output = new Float32Array(total);
+    const code = variant === 'start' ? BARKER_7 : [...BARKER_7].reverse().map((v, i) => i % 2 ? -v : v);
+    for (let chip = 0; chip < code.length; chip++) {
+      const offset = chip * (chipSamples + gapSamples);
+      const alternate = chip % 2 === 1;
+      let f0;
+      let f1;
+      if (variant === 'start') {
+        f0 = alternate ? 2850 : 720;
+        f1 = alternate ? 980 : 3180;
+      } else {
+        f0 = alternate ? 7900 : 4050;
+        f1 = alternate ? 4550 : 8250;
+      }
+      fillLogChirp(output, offset, sampleRate, f0, f1, chipDuration, level, code[chip]);
+    }
     return output;
   }
 
+  function computeExcitationBand(sampleRate, displayStart, displayEnd) {
+    const nyquist = sampleRate / 2;
+    const excitationStart = Math.max(8, displayStart / 1.30);
+    const excitationEnd = Math.min(sampleRate * 0.455, displayEnd * 1.10);
+    const safeStart = Math.max(displayStart, excitationStart * 1.16);
+    const safeEnd = Math.min(displayEnd, excitationEnd / 1.06, sampleRate * 0.44);
+    return {
+      displayStart,
+      displayEnd,
+      excitationStart,
+      excitationEnd,
+      safeStart,
+      safeEnd,
+      nyquist,
+      hasUpperGuard: excitationEnd >= displayEnd * 1.055,
+      hasLowerGuard: excitationStart <= displayStart / 1.12
+    };
+  }
+
   function buildMeasurementSignal(sampleRate, config) {
-    const preRoll = Number(config.preRoll ?? 0.7);
-    const gap = Number(config.markerGap ?? 0.52);
+    const preRoll = Number(config.preRoll ?? 0.65);
+    const markerGap = Number(config.markerGap ?? 0.75);
     const responseTail = Number(config.responseTail ?? 2.2);
-    const postRoll = Number(config.postRoll ?? 0.55);
+    const endMarkerGuard = Number(config.endMarkerGuard ?? 0.55);
+    const postRoll = Number(config.postRoll ?? 0.45);
     const level = Number(config.level ?? 0.25);
-    const markerLevel = clamp(Math.max(level * 1.25, 0.18), 0.12, 0.52);
+    const markerLevel = clamp(Math.max(level * 1.25, 0.18), 0.12, 0.50);
+    const band = computeExcitationBand(sampleRate, Number(config.startFreq), Number(config.endFreq));
+    if (!(band.excitationEnd > band.excitationStart * 1.2)) {
+      throw new Error('サンプリング周波数に対して終了周波数が高すぎます。');
+    }
+
     const startMarker = generateMarker(sampleRate, markerLevel, 'start');
     const endMarker = generateMarker(sampleRate, markerLevel, 'end');
     const sweep = generateLogSweep(
       sampleRate,
-      Number(config.startFreq),
-      Number(config.endFreq),
+      band.excitationStart,
+      band.excitationEnd,
       Number(config.sweepDuration),
       level,
-      1
+      1,
+      { fadeInSeconds: 0.085, fadeOutSeconds: 0.035 }
     );
 
     const preSamples = Math.round(preRoll * sampleRate);
-    const gapSamples = Math.round(gap * sampleRate);
+    const gapSamples = Math.round(markerGap * sampleRate);
     const tailSamples = Math.round(responseTail * sampleRate);
+    const guardSamples = Math.round(endMarkerGuard * sampleRate);
     const postSamples = Math.round(postRoll * sampleRate);
     const startMarkerOffset = preSamples;
     const sweepOffset = startMarkerOffset + startMarker.length + gapSamples;
-    const endMarkerOffset = sweepOffset + sweep.length + tailSamples;
+    const analysisEndOffset = sweepOffset + sweep.length + tailSamples;
+    const endMarkerOffset = analysisEndOffset + guardSamples;
     const total = endMarkerOffset + endMarker.length + postSamples;
     const output = new Float32Array(total);
     output.set(startMarker, startMarkerOffset);
@@ -146,17 +176,20 @@
       startMarker,
       endMarker,
       sweep,
+      band,
       offsets: {
         startMarker: startMarkerOffset,
         sweep: sweepOffset,
+        analysisEnd: analysisEndOffset,
         endMarker: endMarkerOffset
       },
       durations: {
         preRoll,
         marker: startMarker.length / sampleRate,
-        markerGap: gap,
+        markerGap,
         sweep: sweep.length / sampleRate,
         responseTail,
+        endMarkerGuard,
         postRoll,
         total: output.length / sampleRate
       }
@@ -250,10 +283,15 @@
     let bestK = -1;
     let bestScore = -Infinity;
     const scores = new Float64Array(last + 1);
+    const minimumWindowEnergy = Math.max(EPS, markerEnergy * 1e-8);
     for (let k = 0; k <= last; k++) {
       const energy = prefix[k + marker.length] - prefix[k];
-      const denom = Math.sqrt(Math.max(EPS, markerEnergy * energy));
-      const score = ar[k + marker.length - 1] / denom;
+      if (!(energy > minimumWindowEnergy)) {
+        scores[k] = 0;
+        continue;
+      }
+      const denom = Math.sqrt(markerEnergy * energy);
+      const score = clamp(ar[k + marker.length - 1] / denom, -1, 1);
       scores[k] = score;
       const absScore = Math.abs(score);
       if (absScore > bestScore) {
@@ -268,8 +306,8 @@
       const y1 = Math.abs(scores[bestK - 1]);
       const y2 = Math.abs(scores[bestK]);
       const y3 = Math.abs(scores[bestK + 1]);
-      const denom = y1 - 2 * y2 + y3;
-      if (Math.abs(denom) > 1e-12) fraction = clamp(0.5 * (y1 - y3) / denom, -0.5, 0.5);
+      const denominator = y1 - 2 * y2 + y3;
+      if (Math.abs(denominator) > 1e-12) fraction = clamp(0.5 * (y1 - y3) / denominator, -0.5, 0.5);
     }
 
     return {
@@ -288,9 +326,44 @@
     return output;
   }
 
-  function deconvolve(recordedSweep, referenceSweep, sampleRate, f0, f1, regularizationDb = -100) {
+  function sinc(value) {
+    if (Math.abs(value) < 1e-12) return 1;
+    const x = Math.PI * value;
+    return Math.sin(x) / x;
+  }
+
+  function resampleClockCorrected(samples, outputLength, timeScale, startOffset = 0, lobes = 6) {
+    const output = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const position = startOffset + i * timeScale;
+      const center = Math.floor(position);
+      let sum = 0;
+      let weightSum = 0;
+      const first = center - lobes + 1;
+      const last = center + lobes;
+      for (let sourceIndex = first; sourceIndex <= last; sourceIndex++) {
+        if (sourceIndex < 0 || sourceIndex >= samples.length) continue;
+        const distance = position - sourceIndex;
+        if (Math.abs(distance) >= lobes) continue;
+        const weight = sinc(distance) * sinc(distance / lobes);
+        sum += samples[sourceIndex] * weight;
+        weightSum += weight;
+      }
+      output[i] = Math.abs(weightSum) > EPS ? sum / weightSum : 0;
+    }
+    return output;
+  }
+
+  function cosineBandWeight(frequency, low0, low1, high0, high1) {
+    if (frequency <= low0 || frequency >= high1) return 0;
+    if (frequency < low1) return raisedCosineIn((frequency - low0) / Math.max(EPS, low1 - low0));
+    if (frequency <= high0) return 1;
+    return raisedCosineIn((high1 - frequency) / Math.max(EPS, high1 - high0));
+  }
+
+  function deconvolve(recordedSweep, referenceSweep, sampleRate, band, regularizationDb = -96) {
     const n = nextPowerOfTwo(recordedSweep.length);
-    if (referenceSweep.length >= n) throw new Error('解析FFT長が不足しています。スイープ時間または残響時間を短くしてください。');
+    if (referenceSweep.length >= n) throw new Error('解析FFT長が不足しています。残響収録時間を増やしてください。');
     const xr = new Float64Array(n);
     const xi = new Float64Array(n);
     const yr = new Float64Array(n);
@@ -300,40 +373,43 @@
     fft(xr, xi, false);
     fft(yr, yi, false);
 
+    const half = n >> 1;
     let maxPower = 0;
-    for (let k = 0; k <= n / 2; k++) {
-      const p = xr[k] * xr[k] + xi[k] * xi[k];
-      if (p > maxPower) maxPower = p;
+    for (let k = 0; k <= half; k++) {
+      const power = xr[k] * xr[k] + xi[k] * xi[k];
+      if (power > maxPower) maxPower = power;
     }
     const regularization = maxPower * Math.pow(10, regularizationDb / 10);
+    const referenceSupportDb = new Float32Array(half + 1);
+    for (let k = 0; k <= half; k++) {
+      const power = xr[k] * xr[k] + xi[k] * xi[k];
+      referenceSupportDb[k] = db10(power / Math.max(EPS, maxPower));
+    }
+
     const nyquist = sampleRate / 2;
+    const low0 = Math.max(1, band.excitationStart * 0.70);
+    const low1 = band.excitationStart;
+    const high0 = band.excitationEnd;
+    const high1 = Math.min(nyquist * 0.995, band.excitationEnd * 1.055);
+
     for (let k = 0; k < n; k++) {
-      const folded = k <= n / 2 ? k : n - k;
+      const folded = k <= half ? k : n - k;
       const frequency = folded * sampleRate / n;
       const xPower = xr[k] * xr[k] + xi[k] * xi[k];
-      const denom = xPower + regularization;
-      let hr = (yr[k] * xr[k] + yi[k] * xi[k]) / denom;
-      let hi = (yi[k] * xr[k] - yr[k] * xi[k]) / denom;
-
-      // Smooth cosine band limit suppresses unstable inverse outside the sweep band.
-      const low0 = Math.max(1, f0 * 0.55);
-      const low1 = f0;
-      const high0 = Math.min(nyquist * 0.98, f1);
-      const high1 = Math.min(nyquist, f1 * 1.08);
-      let weight = 1;
-      if (frequency < low0 || frequency > high1) weight = 0;
-      else if (frequency < low1) weight = 0.5 - 0.5 * Math.cos(Math.PI * (frequency - low0) / Math.max(EPS, low1 - low0));
-      else if (frequency > high0) weight = 0.5 + 0.5 * Math.cos(Math.PI * (frequency - high0) / Math.max(EPS, high1 - high0));
+      const denominator = xPower + regularization;
+      let hr = (yr[k] * xr[k] + yi[k] * xi[k]) / denominator;
+      let hi = (yi[k] * xr[k] - yr[k] * xi[k]) / denominator;
+      const weight = cosineBandWeight(frequency, low0, low1, high0, high1);
       hr *= weight;
       hi *= weight;
       yr[k] = hr;
       yi[k] = hi;
     }
     fft(yr, yi, true);
-    return { impulse: yr, fftSize: n };
+    return { impulse: yr, fftSize: n, referenceSupportDb };
   }
 
-  function findMainImpulse(impulse, sampleRate, maxSearchSeconds = 0.25) {
+  function findMainImpulse(impulse, sampleRate, maxSearchSeconds = 0.45) {
     const end = Math.min(impulse.length, Math.round(maxSearchSeconds * sampleRate));
     let best = 0;
     let index = 0;
@@ -347,25 +423,55 @@
     return { index, amplitude: best };
   }
 
-  function makeGatedImpulse(impulse, sampleRate, peakIndex, gateMs, responseTailSeconds) {
+  function fullWindowValue(type, x) {
+    x = clamp(x, 0, 1);
+    if (type === 'hann') return 0.5 - 0.5 * Math.cos(TAU * x);
+    if (type === 'blackman-harris') {
+      const a0 = 0.35875;
+      const a1 = 0.48829;
+      const a2 = 0.14128;
+      const a3 = 0.01168;
+      return a0 - a1 * Math.cos(TAU * x) + a2 * Math.cos(2 * TAU * x) - a3 * Math.cos(3 * TAU * x);
+    }
+    // Tukey-like cosine edge.
+    return 0.5 - 0.5 * Math.cos(TAU * x);
+  }
+
+  function halfWindowIn(type, position) {
+    return fullWindowValue(type, 0.5 * clamp(position, 0, 1));
+  }
+
+  function halfWindowOut(type, position) {
+    return fullWindowValue(type, 0.5 + 0.5 * clamp(position, 0, 1));
+  }
+
+  function makeGatedImpulse(impulse, sampleRate, peakIndex, gateMs, responseTailSeconds, windowType = 'blackman-harris') {
     const n = impulse.length;
     const output = new Float64Array(n);
-    const preSamples = Math.max(1, Math.round(sampleRate * 0.003));
+    const preSamples = Math.max(1, Math.round(sampleRate * 0.004));
     const start = Math.max(0, peakIndex - preSamples);
     const requestedEnd = gateMs === 'full' || gateMs === 0
       ? peakIndex + Math.round(responseTailSeconds * sampleRate)
       : peakIndex + Math.round(Number(gateMs) * sampleRate / 1000);
-    const end = Math.min(n, Math.max(start + 8, requestedEnd));
-    const availablePre = Math.max(0, peakIndex - start);
-    const leftFade = Math.min(availablePre, Math.max(1, Math.round((end - start) * 0.04)));
-    const rightFade = Math.min(Math.max(1, Math.round(sampleRate * 0.012)), Math.max(1, Math.round((end - start) * 0.12)));
+    const end = Math.min(n, Math.max(start + 16, requestedEnd));
+    const leftFade = Math.max(1, peakIndex - start);
+    const rightFade = Math.min(
+      Math.max(1, Math.round(sampleRate * 0.080)),
+      Math.max(1, Math.round((end - peakIndex) * 0.20))
+    );
     for (let i = start; i < end; i++) {
-      let w = 1;
-      if (leftFade > 0 && i < start + leftFade) w *= 0.5 - 0.5 * Math.cos(Math.PI * (i - start) / leftFade);
-      if (i >= end - rightFade) w *= 0.5 - 0.5 * Math.cos(Math.PI * (end - 1 - i) / rightFade);
-      output[i] = impulse[i] * w;
+      let weight = 1;
+      if (i < peakIndex) weight *= halfWindowIn(windowType, (i - start) / Math.max(1, leftFade));
+      if (i >= end - rightFade) weight *= halfWindowOut(windowType, (i - (end - rightFade)) / Math.max(1, rightFade - 1));
+      output[i] = impulse[i] * weight;
     }
-    return { samples: output, start, end, effectiveGateMs: (end - peakIndex) * 1000 / sampleRate };
+    return {
+      samples: output,
+      start,
+      end,
+      effectiveGateMs: (end - peakIndex) * 1000 / sampleRate,
+      windowType
+    };
   }
 
   function fftImpulse(gatedImpulse) {
@@ -388,74 +494,150 @@
     }
     const a = calibration[lo];
     const b = calibration[hi];
-    const x = (Math.log(frequency) - Math.log(a.f)) / (Math.log(b.f) - Math.log(a.f));
-    return a.db + (b.db - a.db) * x;
+    const ratio = (Math.log(frequency) - Math.log(a.f)) / (Math.log(b.f) - Math.log(a.f));
+    return a.db + (b.db - a.db) * ratio;
   }
 
-  function sampleFrequencyResponse(spectrum, sampleRate, f0, f1, smoothing, calibration, peakIndex) {
+  function unwrapAngles(wrappedAngles) {
+    const result = new Float64Array(wrappedAngles.length);
+    if (!wrappedAngles.length) return result;
+    result[0] = wrappedAngles[0];
+    for (let i = 1; i < wrappedAngles.length; i++) {
+      let angle = wrappedAngles[i];
+      const previous = result[i - 1];
+      while (angle - previous > Math.PI) angle -= TAU;
+      while (angle - previous < -Math.PI) angle += TAU;
+      result[i] = angle;
+    }
+    return result;
+  }
+
+  function localLinearSlope(xs, ys, center, radius, validMask) {
+    const start = Math.max(0, center - radius);
+    const end = Math.min(xs.length - 1, center + radius);
+    let count = 0;
+    let sumX = 0;
+    let sumY = 0;
+    for (let i = start; i <= end; i++) {
+      if (validMask && !validMask[i]) continue;
+      sumX += xs[i];
+      sumY += ys[i];
+      count++;
+    }
+    if (count < 3) return NaN;
+    const meanX = sumX / count;
+    const meanY = sumY / count;
+    let numerator = 0;
+    let denominator = 0;
+    for (let i = start; i <= end; i++) {
+      if (validMask && !validMask[i]) continue;
+      const dx = xs[i] - meanX;
+      numerator += dx * (ys[i] - meanY);
+      denominator += dx * dx;
+    }
+    return denominator > EPS ? numerator / denominator : NaN;
+  }
+
+  function medianSmooth(points, key, radius = 2) {
+    const values = points.map((point) => point[key]);
+    return points.map((point, index) => {
+      const local = [];
+      for (let i = Math.max(0, index - radius); i <= Math.min(points.length - 1, index + radius); i++) {
+        if (Number.isFinite(values[i])) local.push(values[i]);
+      }
+      local.sort((a, b) => a - b);
+      const value = local.length ? local[Math.floor(local.length / 2)] : NaN;
+      return { ...point, [key]: value };
+    });
+  }
+
+  function sampleFrequencyResponse(spectrum, referenceSupportDb, sampleRate, band, smoothing, calibration, peakIndex) {
     const n = spectrum.real.length;
     const half = n >> 1;
     const binHz = sampleRate / n;
-    const count = 360;
+    const count = 420;
     const magnitude = [];
-    const phase = [];
+    const wrappedRadians = [];
+    const angularFrequencies = [];
+    const validMask = [];
     const halfOctave = smoothing > 0 ? 1 / (2 * smoothing) : 0;
 
     for (let i = 0; i < count; i++) {
-      const f = f0 * Math.pow(f1 / f0, i / (count - 1));
+      const frequency = band.displayStart * Math.pow(band.displayEnd / band.displayStart, i / (count - 1));
       let lo;
       let hi;
       if (smoothing > 0) {
-        lo = Math.max(1, Math.floor((f / Math.pow(2, halfOctave)) / binHz));
-        hi = Math.min(half - 1, Math.ceil((f * Math.pow(2, halfOctave)) / binHz));
+        lo = Math.max(1, Math.floor((frequency / Math.pow(2, halfOctave)) / binHz));
+        hi = Math.min(half - 1, Math.ceil((frequency * Math.pow(2, halfOctave)) / binHz));
       } else {
-        const center = Math.round(f / binHz);
+        const center = Math.round(frequency / binHz);
         lo = Math.max(1, center - 1);
         hi = Math.min(half - 1, center + 1);
       }
       let power = 0;
-      let valid = 0;
+      let supportPower = 0;
+      let validBins = 0;
       for (let k = lo; k <= hi; k++) {
         const re = spectrum.real[k];
         const im = spectrum.imag[k];
         power += re * re + im * im;
-        valid++;
+        supportPower += Math.pow(10, referenceSupportDb[k] / 10);
+        validBins++;
       }
-      let db = db10(power / Math.max(1, valid));
-      db += interpolateCalibration(calibration, f);
-      magnitude.push({ f, db });
+      let db = db10(power / Math.max(1, validBins));
+      db += interpolateCalibration(calibration, frequency);
+      const supportDb = db10(supportPower / Math.max(1, validBins));
+      const valid = frequency >= band.safeStart && frequency <= band.safeEnd && supportDb > -58;
+      magnitude.push({ f: frequency, db, valid, supportDb });
+      validMask.push(valid);
 
-      const exactBin = clamp(Math.round(f / binHz), 1, half - 1);
+      const exactBin = clamp(Math.round(frequency / binHz), 1, half - 1);
       const re = spectrum.real[exactBin];
       const im = spectrum.imag[exactBin];
-      const delayCorrection = TAU * f * peakIndex / sampleRate;
+      const delayCorrection = TAU * frequency * peakIndex / sampleRate;
       let angle = Math.atan2(im, re) + delayCorrection;
       angle = ((angle + Math.PI) % TAU + TAU) % TAU - Math.PI;
-      phase.push({ f, deg: angle * 180 / Math.PI });
+      wrappedRadians.push(angle);
+      angularFrequencies.push(TAU * frequency);
     }
-    return { magnitude, phase };
+
+    const unwrappedRadians = unwrapAngles(wrappedRadians);
+    const phase = magnitude.map((point, index) => ({
+      f: point.f,
+      deg: wrappedRadians[index] * 180 / Math.PI,
+      unwrappedDeg: unwrappedRadians[index] * 180 / Math.PI,
+      valid: point.valid
+    }));
+
+    let groupDelay = magnitude.map((point, index) => {
+      const slope = localLinearSlope(angularFrequencies, unwrappedRadians, index, 4, validMask);
+      return { f: point.f, ms: Number.isFinite(slope) ? -slope * 1000 : NaN, valid: point.valid };
+    });
+    groupDelay = medianSmooth(groupDelay, 'ms', 2);
+
+    return { magnitude, phase, groupDelay };
   }
 
   function normalizeMagnitude(points, low, high) {
-    const band = points.filter((p) => p.f >= low && p.f <= high);
+    const band = points.filter((point) => point.valid !== false && point.f >= low && point.f <= high);
     if (!band.length) return 0;
     let sum = 0;
-    for (const p of band) sum += Math.pow(10, p.db / 10);
+    for (const point of band) sum += Math.pow(10, point.db / 10);
     const offset = db10(sum / band.length);
-    for (const p of points) p.db -= offset;
+    for (const point of points) point.db -= offset;
     return offset;
   }
 
   function averageDb(points, low, high) {
-    const values = points.filter((p) => p.f >= low && p.f <= high);
+    const values = points.filter((point) => point.valid !== false && point.f >= low && point.f <= high);
     if (!values.length) return null;
     let sum = 0;
-    for (const p of values) sum += Math.pow(10, p.db / 10);
+    for (const point of values) sum += Math.pow(10, point.db / 10);
     return db10(sum / values.length);
   }
 
   function findLowExtension(points, thresholdDb) {
-    const candidates = points.filter((p) => p.f <= 500 && p.db >= thresholdDb);
+    const candidates = points.filter((point) => point.valid !== false && point.f <= 500 && point.db >= thresholdDb);
     return candidates.length ? candidates[0].f : null;
   }
 
@@ -487,12 +669,39 @@
     return series;
   }
 
+  function makeStepSeries(gatedImpulse, sampleRate, peakIndex, effectiveGateMs) {
+    const start = Math.max(0, peakIndex - Math.round(sampleRate * 0.005));
+    const end = Math.min(gatedImpulse.length, peakIndex + Math.round(sampleRate * Math.min(500, Math.max(100, effectiveGateMs)) / 1000));
+    let baseline = 0;
+    const baselineEnd = Math.max(start + 1, peakIndex - Math.round(sampleRate * 0.001));
+    for (let i = start; i < baselineEnd; i++) baseline += gatedImpulse[i];
+    baseline /= Math.max(1, baselineEnd - start);
+    const cumulative = new Float64Array(end - start);
+    let value = 0;
+    let maxAbs = 0;
+    for (let i = start; i < end; i++) {
+      value += gatedImpulse[i] - baseline;
+      cumulative[i - start] = value;
+      maxAbs = Math.max(maxAbs, Math.abs(value));
+    }
+    const targetCount = 1600;
+    const stride = Math.max(1, Math.floor(cumulative.length / targetCount));
+    const output = [];
+    for (let i = 0; i < cumulative.length; i += stride) {
+      output.push({
+        tMs: (start + i - peakIndex) * 1000 / sampleRate,
+        value: maxAbs > EPS ? cumulative[i] / maxAbs : 0
+      });
+    }
+    return output;
+  }
+
   function estimateTrackingAmplitude(samples, sampleRate, f0, f1, duration, timeScale, peakDelaySamples, targetFrequency, harmonic) {
     const logRatio = Math.log(f1 / f0);
     const L = duration / logRatio;
     const nominalCenterTime = L * Math.log(targetFrequency / f0);
     const center = peakDelaySamples + nominalCenterTime * sampleRate * timeScale;
-    const windowSeconds = clamp(10 / Math.max(20, targetFrequency), 0.028, 0.14);
+    const windowSeconds = clamp(16 / Math.max(20, targetFrequency), 0.024, 0.36);
     const half = Math.round(windowSeconds * sampleRate / 2);
     const start = Math.max(0, Math.floor(center - half));
     const end = Math.min(samples.length, Math.ceil(center + half));
@@ -504,39 +713,156 @@
       const sourceTime = (i - peakDelaySamples) / (sampleRate * timeScale);
       if (sourceTime < 0 || sourceTime > duration) continue;
       const relative = (i - start) / Math.max(1, end - start - 1);
-      const w = 0.5 - 0.5 * Math.cos(TAU * relative);
+      const weight = 0.5 - 0.5 * Math.cos(TAU * relative);
       const phase = harmonic * logSweepPhase(sourceTime, f0, f1, duration);
-      real += samples[i] * w * Math.cos(phase);
-      imag -= samples[i] * w * Math.sin(phase);
-      weightSum += w;
+      real += samples[i] * weight * Math.cos(phase);
+      imag -= samples[i] * weight * Math.sin(phase);
+      weightSum += weight;
     }
     return weightSum > 0 ? 2 * Math.hypot(real, imag) / weightSum : 0;
   }
 
-  function estimateThd(recordedSweep, sampleRate, config, peakIndex) {
-    const f0 = Number(config.startFreq);
-    const f1 = Number(config.endFreq);
+  function estimateTrackedMagnitude(recordedSweepObserved, sampleRate, config, band, timeScale, delayObservedSamples, calibration, smoothing, supportTemplate) {
+    const count = supportTemplate.length;
+    const raw = [];
+    for (let i = 0; i < count; i++) {
+      const frequency = supportTemplate[i].f;
+      const amplitude = estimateTrackingAmplitude(
+        recordedSweepObserved,
+        sampleRate,
+        band.excitationStart,
+        band.excitationEnd,
+        Number(config.sweepDuration),
+        timeScale,
+        delayObservedSamples,
+        frequency,
+        1
+      );
+      raw.push({
+        f: frequency,
+        power: amplitude * amplitude,
+        valid: supportTemplate[i].valid,
+        supportDb: supportTemplate[i].supportDb
+      });
+    }
+    const halfOctave = smoothing > 0 ? 1 / (2 * smoothing) : 0;
+    return raw.map((point, index) => {
+      let power = point.power;
+      if (smoothing > 0) {
+        const low = point.f / Math.pow(2, halfOctave);
+        const high = point.f * Math.pow(2, halfOctave);
+        let sum = 0;
+        let countInBand = 0;
+        for (let j = 0; j < raw.length; j++) {
+          if (raw[j].f < low || raw[j].f > high) continue;
+          sum += raw[j].power;
+          countInBand++;
+        }
+        if (countInBand) power = sum / countInBand;
+      }
+      return {
+        f: point.f,
+        db: db10(power) + interpolateCalibration(calibration, point.f),
+        valid: point.valid,
+        supportDb: point.supportDb
+      };
+    });
+  }
+
+  function estimateThd(recordedSweep, sampleRate, config, peakIndex, safeBand) {
+    const f0 = Number(config.excitationStartFreq);
+    const f1 = Number(config.excitationEndFreq);
     const duration = Number(config.sweepDuration);
     const timeScale = Number(config.timeScale ?? 1);
-    const maxFundamental = Math.min(f1 / 5, sampleRate * 0.45 / 5, 10000);
-    const minFundamental = Math.max(f0 * 1.25, 30);
+    const maxFundamental = Math.min(safeBand.safeEnd / 5, f1 / 5, sampleRate * 0.45 / 5, 10000);
+    const minFundamental = Math.max(safeBand.safeStart, f0 * 1.25, 30);
     if (maxFundamental <= minFundamental) return [];
     const points = [];
-    const count = 72;
+    const count = 76;
     for (let i = 0; i < count; i++) {
-      const f = minFundamental * Math.pow(maxFundamental / minFundamental, i / (count - 1));
-      const a1 = estimateTrackingAmplitude(recordedSweep, sampleRate, f0, f1, duration, timeScale, peakIndex, f, 1);
-      if (!(a1 > 1e-8)) continue;
+      const frequency = minFundamental * Math.pow(maxFundamental / minFundamental, i / (count - 1));
+      const fundamental = estimateTrackingAmplitude(recordedSweep, sampleRate, f0, f1, duration, timeScale, peakIndex, frequency, 1);
+      if (!(fundamental > 1e-8)) continue;
+      const harmonics = {};
       let harmonicPower = 0;
-      for (let h = 2; h <= 5; h++) {
-        if (h * f >= sampleRate * 0.48) break;
-        const ah = estimateTrackingAmplitude(recordedSweep, sampleRate, f0, f1, duration, timeScale, peakIndex, f, h);
-        harmonicPower += ah * ah;
+      for (let harmonic = 2; harmonic <= 5; harmonic++) {
+        if (harmonic * frequency >= sampleRate * 0.47) {
+          harmonics[`h${harmonic}`] = null;
+          continue;
+        }
+        const amplitude = estimateTrackingAmplitude(recordedSweep, sampleRate, f0, f1, duration, timeScale, peakIndex, frequency, harmonic);
+        const ratio = amplitude / fundamental;
+        harmonics[`h${harmonic}`] = ratio * 100;
+        harmonicPower += amplitude * amplitude;
       }
-      const ratio = Math.sqrt(harmonicPower) / a1;
-      points.push({ f, percent: ratio * 100, db: db20(ratio) });
+      const totalRatio = Math.sqrt(harmonicPower) / fundamental;
+      points.push({
+        f: frequency,
+        percent: totalRatio * 100,
+        db: db20(totalRatio),
+        h2: harmonics.h2,
+        h3: harmonics.h3,
+        h4: harmonics.h4,
+        h5: harmonics.h5
+      });
     }
     return points;
+  }
+
+  function computeDecayMap(impulse, sampleRate, peakIndex, band, effectiveGateMs) {
+    const fftSize = sampleRate >= 46000 ? 8192 : 8192;
+    const windowMs = fftSize * 1000 / sampleRate;
+    const availableMs = Math.max(0, Math.min(500, effectiveGateMs - windowMs * 0.55));
+    const maxTimeMs = Math.max(80, availableMs);
+    const timeCount = 48;
+    const frequencyCount = 96;
+    const timesMs = [];
+    const frequencies = [];
+    for (let i = 0; i < timeCount; i++) timesMs.push(maxTimeMs * i / (timeCount - 1));
+    for (let i = 0; i < frequencyCount; i++) {
+      frequencies.push(band.safeStart * Math.pow(band.safeEnd / band.safeStart, i / (frequencyCount - 1)));
+    }
+
+    const raw = Array.from({ length: timeCount }, () => new Float32Array(frequencyCount));
+    const binHz = sampleRate / fftSize;
+    for (let timeIndex = 0; timeIndex < timeCount; timeIndex++) {
+      const start = peakIndex + Math.round(timesMs[timeIndex] * sampleRate / 1000);
+      const real = new Float64Array(fftSize);
+      const imag = new Float64Array(fftSize);
+      for (let i = 0; i < fftSize; i++) {
+        const sourceIndex = start + i;
+        const sample = sourceIndex < impulse.length ? impulse[sourceIndex] : 0;
+        const window = 0.5 - 0.5 * Math.cos(TAU * i / Math.max(1, fftSize - 1));
+        real[i] = sample * window;
+      }
+      fft(real, imag, false);
+      for (let frequencyIndex = 0; frequencyIndex < frequencyCount; frequencyIndex++) {
+        const center = clamp(Math.round(frequencies[frequencyIndex] / binHz), 1, fftSize / 2 - 1);
+        const low = Math.max(1, center - 1);
+        const high = Math.min(fftSize / 2 - 1, center + 1);
+        let power = 0;
+        for (let k = low; k <= high; k++) power += real[k] * real[k] + imag[k] * imag[k];
+        raw[timeIndex][frequencyIndex] = db10(power / (high - low + 1));
+      }
+    }
+
+    const valuesDb = Array.from({ length: timeCount }, () => new Float32Array(frequencyCount));
+    for (let frequencyIndex = 0; frequencyIndex < frequencyCount; frequencyIndex++) {
+      let maximum = -Infinity;
+      for (let timeIndex = 0; timeIndex < timeCount; timeIndex++) maximum = Math.max(maximum, raw[timeIndex][frequencyIndex]);
+      for (let timeIndex = 0; timeIndex < timeCount; timeIndex++) {
+        valuesDb[timeIndex][frequencyIndex] = clamp(raw[timeIndex][frequencyIndex] - maximum, -60, 0);
+      }
+    }
+
+    return {
+      timesMs,
+      frequencies,
+      valuesDb: valuesDb.map((row) => Array.from(row)),
+      floorDb: -60,
+      ceilingDb: 0,
+      windowMs
+    };
   }
 
   function countClipping(samples, threshold = 0.995) {
@@ -552,29 +878,32 @@
 
   function analyzeMeasurement(recordedInput, sampleRate, config, progress = () => {}) {
     const recorded = removeDc(recordedInput);
-    const startMarker = generateMarker(sampleRate, config.markerLevel, 'start');
-    const endMarker = generateMarker(sampleRate, config.markerLevel, 'end');
+    const markerLevel = Number(config.markerLevel);
+    const startMarker = generateMarker(sampleRate, markerLevel, 'start');
+    const endMarker = generateMarker(sampleRate, markerLevel, 'end');
+    const band = computeExcitationBand(sampleRate, Number(config.startFreq), Number(config.endFreq));
 
-    progress(0.05, '開始マーカーを相互相関で検出しています…');
-    const startSearchEnd = Math.min(recorded.length, Math.round(sampleRate * 4.5));
+    progress(0.04, '開始マーカーを符号化相互相関で検出しています…');
+    const startSearchEnd = Math.min(recorded.length, Math.round(sampleRate * 5.0));
     const startDetection = normalizedCrossCorrelation(recorded, startMarker, {
       searchStart: 0,
       searchEnd: startSearchEnd
     });
     if (!startDetection || startDetection.score < 0.055) {
-      throw new Error('開始マーカーを十分な確度で検出できませんでした。出力音量、周囲騒音、スピーカーとの接続を確認してください。');
+      throw new Error('開始マーカーを十分な確度で検出できませんでした。出力レベル、周囲騒音、スピーカー接続を確認してください。');
     }
 
-    const expectedMarkerInterval = (
+    const expectedMarkerIntervalSeconds = (
       startMarker.length / sampleRate +
       Number(config.markerGap) +
       Number(config.sweepDuration) +
-      Number(config.responseTail)
+      Number(config.responseTail) +
+      Number(config.endMarkerGuard)
     );
-    const predictedEnd = startDetection.startSample + expectedMarkerInterval * sampleRate;
-    const endWindow = Math.round(sampleRate * 1.35);
+    const predictedEnd = startDetection.startSample + expectedMarkerIntervalSeconds * sampleRate;
+    const endWindow = Math.round(sampleRate * 1.5);
 
-    progress(0.12, '終了マーカーを検出し、クロック差を推定しています…');
+    progress(0.10, '終了マーカーを検出して録音クロック差を推定しています…');
     const endDetection = normalizedCrossCorrelation(recorded, endMarker, {
       searchStart: Math.max(0, predictedEnd - endWindow),
       searchEnd: Math.min(recorded.length, predictedEnd + endWindow + endMarker.length)
@@ -584,7 +913,7 @@
     let driftPpm = null;
     if (endDetection && endDetection.score >= 0.045) {
       const observed = endDetection.startSample - startDetection.startSample;
-      const expected = expectedMarkerInterval * sampleRate;
+      const expected = expectedMarkerIntervalSeconds * sampleRate;
       timeScale = clamp(observed / expected, 0.995, 1.005);
       driftPpm = (timeScale - 1) * 1e6;
     }
@@ -592,54 +921,84 @@
     const sweepStartFloat = startDetection.startSample + (
       startMarker.length / sampleRate + Number(config.markerGap)
     ) * sampleRate * timeScale;
-    const sweepStart = Math.max(0, Math.round(sweepStartFloat));
+    const sweepStart = Math.max(0, Math.floor(sweepStartFloat));
+    const fractionalStartSamples = sweepStartFloat - sweepStart;
     const sweepCount = Math.round(Number(config.sweepDuration) * sampleRate * timeScale);
     const tailCount = Math.round(Number(config.responseTail) * sampleRate * timeScale);
-    const recordedSweepEnd = Math.min(recorded.length, sweepStart + sweepCount + tailCount);
-    if (recordedSweepEnd - sweepStart < sweepCount + Math.round(sampleRate * 0.25)) {
+    const nominalAnalysisEnd = sweepStart + sweepCount + tailCount;
+    const safeBeforeMarker = endDetection
+      ? Math.floor(endDetection.startSample - Math.max(sampleRate * 0.12, Number(config.endMarkerGuard) * sampleRate * timeScale * 0.35))
+      : recorded.length;
+    const analysisEnd = Math.min(recorded.length, nominalAnalysisEnd, safeBeforeMarker);
+    if (analysisEnd - sweepStart < sweepCount + Math.round(sampleRate * 0.25)) {
       throw new Error('スイープ後半または残響区間が不足しています。録音が途中で停止した可能性があります。');
     }
 
-    const recordedSweep = recorded.slice(sweepStart, recordedSweepEnd);
+    const recordedSweepObserved = recorded.slice(sweepStart, analysisEnd);
+    const nominalResponseLength = Math.round((Number(config.sweepDuration) + Number(config.responseTail)) * sampleRate);
+    progress(0.15, '開始・終了マーカーから録音クロック差を補間補正しています…');
+    const recordedSweep = resampleClockCorrected(
+      recordedSweepObserved,
+      nominalResponseLength,
+      timeScale,
+      fractionalStartSamples,
+      6
+    );
     const referenceSweep = generateLogSweep(
       sampleRate,
-      Number(config.startFreq),
-      Number(config.endFreq),
+      band.excitationStart,
+      band.excitationEnd,
       Number(config.sweepDuration),
       Number(config.level),
-      timeScale
+      1,
+      { fadeInSeconds: 0.085, fadeOutSeconds: 0.035 }
     );
 
-    progress(0.22, '正則化デコンボリューションを実行しています…');
+    progress(0.22, 'ガード帯域付き正則化デコンボリューションを実行しています…');
     const deconvolved = deconvolve(
       recordedSweep,
       referenceSweep,
       sampleRate,
-      Number(config.startFreq),
-      Number(config.endFreq),
-      Number(config.regularizationDb ?? -100)
+      band,
+      Number(config.regularizationDb ?? -96)
     );
-    const peak = findMainImpulse(deconvolved.impulse, sampleRate, 0.28);
+    const peak = findMainImpulse(deconvolved.impulse, sampleRate, 0.45);
 
-    progress(0.55, 'インパルス応答へ時間窓を適用しています…');
+    progress(0.43, 'インパルス応答へ低漏洩時間窓を適用しています…');
     const gated = makeGatedImpulse(
       deconvolved.impulse,
       sampleRate,
       peak.index,
       config.gateMs,
-      Number(config.responseTail) * timeScale
+      Number(config.responseTail) * timeScale,
+      String(config.windowType || 'blackman-harris')
     );
     const spectrum = fftImpulse(gated.samples);
 
-    progress(0.72, '振幅・位相特性を算出しています…');
+    progress(0.58, '振幅・位相・群遅延を算出しています…');
     const response = sampleFrequencyResponse(
       spectrum,
+      deconvolved.referenceSupportDb,
       sampleRate,
-      Number(config.startFreq),
-      Math.min(Number(config.endFreq), sampleRate * 0.47),
+      band,
       Number(config.smoothing),
       Array.isArray(config.calibration) ? config.calibration : [],
       peak.index
+    );
+    // Magnitude is estimated by coherent ESS tracking rather than by the
+    // inverse-filter edge bins. This keeps the 20 kHz display endpoint away
+    // from marker leakage and inverse-spectrum amplification.
+    const trackingDelayObservedSamples = fractionalStartSamples + peak.index * timeScale;
+    response.magnitude = estimateTrackedMagnitude(
+      recordedSweepObserved,
+      sampleRate,
+      config,
+      band,
+      timeScale,
+      trackingDelayObservedSamples,
+      Array.isArray(config.calibration) ? config.calibration : [],
+      Number(config.smoothing),
+      response.magnitude
     );
     let normalizationOffset = 0;
     if (config.normalize !== false) {
@@ -650,34 +1009,63 @@
       );
     }
 
-    progress(0.84, '参考THDをトラッキング解析しています…');
-    const thd = estimateThd(recordedSweep, sampleRate, { ...config, timeScale }, peak.index);
-
+    progress(0.70, 'ステップ応答と時間周波数減衰を生成しています…');
     const impulseSeries = makeImpulseSeries(deconvolved.impulse, sampleRate, peak.index, gated.effectiveGateMs);
+    const stepSeries = makeStepSeries(gated.samples, sampleRate, peak.index, gated.effectiveGateMs);
+    const decay = computeDecayMap(deconvolved.impulse, sampleRate, peak.index, band, gated.effectiveGateMs);
+
+    progress(0.84, '第2～第5高調波とTHDを追従解析しています…');
+    const thd = estimateThd(recordedSweep, sampleRate, {
+      ...config,
+      timeScale: 1,
+      excitationStartFreq: band.excitationStart,
+      excitationEndFreq: band.excitationEnd
+    }, peak.index, band);
+
     const noiseEnd = Math.max(0, Math.floor(startDetection.startSample - sampleRate * 0.08));
     const noiseStart = Math.max(0, noiseEnd - Math.round(sampleRate * 0.45));
     const noiseRms = rms(recorded, noiseStart, noiseEnd);
-    const signalRms = rms(recordedSweep, 0, Math.min(recordedSweep.length, sweepCount));
+    const signalRms = rms(recordedSweep, 0, Math.min(recordedSweep.length, Math.round(Number(config.sweepDuration) * sampleRate)));
     const clipping = countClipping(recorded);
-    const peakPoint = response.magnitude.reduce((best, point) => point.db > best.db ? point : best, response.magnitude[0]);
+    const validMagnitude = response.magnitude.filter((point) => point.valid);
+    const peakPoint = validMagnitude.length
+      ? validMagnitude.reduce((best, point) => point.db > best.db ? point : best, validMagnitude[0])
+      : null;
     const latencyMs = (startDetection.startSample - Number(config.preRoll) * sampleRate) * 1000 / sampleRate;
+    const analysisMarginMs = endDetection ? (endDetection.startSample - analysisEnd) * 1000 / sampleRate : null;
 
-    progress(0.96, '測定品質を評価しています…');
+    progress(0.94, '終了マーカー混入と測定信頼帯域を検証しています…');
+    const leakageSearchStart = Math.max(0, recordedSweepObserved.length - Math.round(sampleRate * 0.75));
+    const leakageDetection = recordedSweepObserved.length - leakageSearchStart > endMarker.length
+      ? normalizedCrossCorrelation(recordedSweepObserved, endMarker, {
+          searchStart: leakageSearchStart,
+          searchEnd: recordedSweepObserved.length
+        })
+      : null;
+
     return {
-      version: '3.3.0',
+      version: '4.0.1',
       sampleRate,
       magnitude: response.magnitude,
       phase: response.phase,
+      groupDelay: response.groupDelay,
       impulse: impulseSeries,
+      step: stepSeries,
+      decay,
       thd,
       summary: {
         latencyMs,
         startMarkerScore: startDetection.score,
         endMarkerScore: endDetection?.score ?? null,
+        markerLeakageScore: leakageDetection?.score ?? null,
+        analysisMarginMs,
         driftPpm,
         timeScale,
+        fractionalStartSamples,
+        magnitudeEngine: 'coherent-ess-tracking',
         directArrivalMs: peak.index * 1000 / sampleRate,
         effectiveGateMs: gated.effectiveGateMs,
+        windowType: gated.windowType,
         noiseDbfs: db20(noiseRms),
         signalDbfs: db20(signalRms),
         snrDb: db20(signalRms) - db20(noiseRms),
@@ -690,7 +1078,14 @@
         lowBandDb: averageDb(response.magnitude, 40, 200),
         midBandDb: averageDb(response.magnitude, 500, 2000),
         highBandDb: averageDb(response.magnitude, 4000, 12000),
-        normalizationOffsetDb: normalizationOffset
+        normalizationOffsetDb: normalizationOffset,
+        excitationStartHz: band.excitationStart,
+        excitationEndHz: band.excitationEnd,
+        reliableStartHz: band.safeStart,
+        reliableEndHz: band.safeEnd,
+        upperGuardAvailable: band.hasUpperGuard,
+        lowerGuardAvailable: band.hasLowerGuard,
+        endFrequencyLimited: band.safeEnd < band.displayEnd * 0.995
       }
     };
   }
@@ -704,9 +1099,11 @@
     logSweepPhase,
     generateLogSweep,
     generateMarker,
+    computeExcitationBand,
     buildMeasurementSignal,
     fft,
     normalizedCrossCorrelation,
+    resampleClockCorrected,
     analyzeMeasurement
   };
 });

@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Speaker Measure Pro">
   <title>Speaker Measure Pro</title>
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=3.3.0">
-  <script src="dsp-core.js?v=3.3.0"></script>
+  <link rel="stylesheet" href="styles.css?v=4.0.1">
+  <script src="dsp-core.js?v=4.0.1"></script>
 </head>
 <body>
   <audio id="outputAudio" class="output-audio" playsinline preload="auto" aria-hidden="true"></audio>
@@ -19,11 +19,11 @@
     <div>
       <p class="eyebrow">Speaker acoustic measurement</p>
       <h1>Speaker Measure <span>Pro</span></h1>
-      <p class="lead">開始・終了チャープで音声出力経路の遅延とクロック差を補正し、デコンボリューションから周波数特性、位相、インパルス応答、参考THDを算出します。</p>
+      <p class="lead">符号化された開始・終了マーカーで音声経路の遅延とクロック差を補正し、マーカーを解析区間から完全分離します。ガード帯域付きESSと低漏洩デコンボリューションから、周波数特性、位相、群遅延、時間応答、減衰、THDを算出します。</p>
     </div>
     <div class="header-badges">
       <span id="secureBadge" class="badge">環境確認中</span>
-      <span class="badge version">v3.3.0</span>
+      <span class="badge version">v4.0.1</span>
     </div>
   </header>
 
@@ -34,7 +34,7 @@
           <h2>1. 測定条件</h2>
           <p>自作バスレフ・測定距離10cmを初期値にしています。</p>
         </div>
-        <span class="method-badge">ESS + deconvolution</span>
+        <span class="method-badge">guard-band ESS + marker isolation</span>
       </div>
 
       <div class="form-grid">
@@ -92,10 +92,17 @@
         <div class="form-grid advanced-grid">
           <label>正則化
             <select id="regularizationDb">
-              <option value="-80">−80 dB（安定優先）</option>
+              <option value="-84">−84 dB（安定優先）</option>
               <option value="-90">−90 dB</option>
-              <option value="-100" selected>−100 dB（標準）</option>
-              <option value="-110">−110 dB（精度優先）</option>
+              <option value="-96" selected>−96 dB（標準）</option>
+              <option value="-102">−102 dB（低ノイズ環境）</option>
+            </select>
+          </label>
+          <label>IR窓関数
+            <select id="windowType">
+              <option value="blackman-harris" selected>Blackman-Harris 4-term</option>
+              <option value="hann">Hann</option>
+              <option value="tukey">Tukey / cosine edge</option>
             </select>
           </label>
           <label>正規化
@@ -130,7 +137,7 @@
         <button id="measureBtn" class="accent" disabled>本測定を開始</button>
         <button id="abortBtn" class="danger" disabled>中止</button>
       </div>
-      <p class="hint">測定音は「開始チャープ → ログスイープ → 残響収録 → 終了チャープ」です。終了チャープは録音クロック差の推定にも使用します。</p>
+      <p class="hint">測定音は「符号化開始マーカー → 無音 → ガード帯域付きログスイープ → 残響収録 → 無音ガード → 符号化終了マーカー」です。終了マーカーは解析区間の外側に置き、クロック差の推定だけに使用します。</p>
     </section>
 
     <section class="panel status-panel">
@@ -183,7 +190,7 @@
       <div class="section-heading graph-heading">
         <div>
           <h2>3. 解析結果</h2>
-          <p id="graphSubtitle">相対周波数特性</p>
+          <p id="graphSubtitle">相対周波数特性（−36 dB以下は非表示）</p>
         </div>
         <div class="button-row compact export-buttons">
           <button id="saveBtn" disabled>測定保存</button>
@@ -197,15 +204,18 @@
       <div class="view-tabs" role="tablist" aria-label="グラフ表示">
         <button class="view-tab active" data-view="magnitude" role="tab">周波数特性</button>
         <button class="view-tab" data-view="phase" role="tab">位相</button>
+        <button class="view-tab" data-view="groupDelay" role="tab">群遅延</button>
         <button class="view-tab" data-view="impulse" role="tab">インパルス / ETC</button>
-        <button class="view-tab" data-view="thd" role="tab">参考THD</button>
+        <button class="view-tab" data-view="step" role="tab">ステップ応答</button>
+        <button class="view-tab" data-view="decay" role="tab">時間周波数減衰</button>
+        <button class="view-tab" data-view="thd" role="tab">THD / 高調波</button>
       </div>
 
       <div class="reference-row">
         <label>差分基準
           <select id="referenceSelect"><option value="">なし</option></select>
         </label>
-        <span>周波数特性表示時のみ、選択測定を差し引きます。</span>
+        <span>周波数特性表示時のみ、選択測定を差し引きます。時間周波数減衰は現在の測定だけを表示します。</span>
       </div>
 
       <div class="canvas-wrap"><canvas id="responseCanvas"></canvas></div>
@@ -230,13 +240,14 @@
         <li>10cm測定は室内反射を抑えやすく、試作差の比較に適していますが、ドライバーとポートの距離差により低域の合成値は測定位置で変化します。</li>
         <li>最低域を評価するときは「全残響」または500msを使用してください。短い時間窓では低域分解能が不足します。</li>
         <li>ポート同調の詳細評価では、ドライバー近傍とポート近傍を別々に測定し、面積と距離を考慮して合成する方法がより適切です。</li>
-        <li>結果には音声出力経路、アンプ、スピーカー、iPhoneマイク、室内音響の特性が含まれます。絶対SPLではなく、同一条件の相対比較を主用途としてください。</li>
-        <li>参考THDはログスイープ追従解析による概算です。規格準拠の歪率測定値ではありません。</li>
+        <li>表示帯域の外側までスイープするガード帯域方式により、20kHz端点の逆フィルタ発散を抑えます。44.1kHz入力では安全な上限が20kHz未満になるため、信頼帯域外を自動的に非表示にします。</li>
+        <li>結果には音声出力経路、アンプ、スピーカー、マイク、室内音響の特性が含まれます。絶対SPLではなく、同一条件の相対比較を主用途としてください。</li>
+        <li>THDはログスイープ追従解析による第2～第5高調波の概算です。規格準拠の歪率測定値ではありません。</li>
       </ul>
     </section>
   </main>
 
-  <footer>Speaker Measure Pro 3.3 — local-first / no upload</footer>
-  <script type="module" src="app.js?v=3.3.0"></script>
+  <footer>Speaker Measure Pro 4.0.1 — local-first / no upload</footer>
+  <script type="module" src="app.js?v=4.0.1"></script>
 </body>
 </html>

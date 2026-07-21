@@ -1,13 +1,17 @@
-const VERSION = '3.3.0';
+const VERSION = '4.0.1';
 const DB_NAME = 'speaker-measure-pro';
 const DB_VERSION = 1;
 const STORE_NAME = 'measurements';
 const COLORS = ['#38bdf8', '#a3e635', '#facc15', '#c084fc', '#fb7185', '#2dd4bf', '#f97316', '#818cf8'];
+const MAGNITUDE_DISPLAY_FLOOR_DB = -36;
 const VIEW_LABELS = {
-  magnitude: '相対周波数特性',
+  magnitude: 'ガード帯域補正済み相対周波数特性',
   phase: '直接音遅延を除去したラップ位相',
+  groupDelay: '直接音基準の相対群遅延',
   impulse: 'インパルス応答のエネルギー時間曲線（ETC）',
-  thd: 'ログスイープ追従解析による参考THD'
+  step: '帯域制限済みステップ応答',
+  decay: '時間周波数減衰（周波数ごとに0 dB正規化）',
+  thd: 'ログスイープ追従解析によるTHD・第2～第5高調波'
 };
 const $ = (id) => document.getElementById(id);
 
@@ -16,7 +20,7 @@ const ui = {
   startFreq: $('startFreq'), endFreq: $('endFreq'), duration: $('duration'),
   level: $('level'), levelOut: $('levelOut'), smoothing: $('smoothing'), gateMs: $('gateMs'),
   distanceCm: $('distanceCm'), speakerType: $('speakerType'), measurementName: $('measurementName'),
-  regularizationDb: $('regularizationDb'), normalizeMode: $('normalizeMode'), magnitudeRange: $('magnitudeRange'),
+  regularizationDb: $('regularizationDb'), windowType: $('windowType'), normalizeMode: $('normalizeMode'), magnitudeRange: $('magnitudeRange'),
   calibrationFile: $('calibrationFile'), calibrationStatus: $('calibrationStatus'), clearCalibrationBtn: $('clearCalibrationBtn'),
   prepareBtn: $('prepareBtn'), testBtn: $('testBtn'), markerBtn: $('markerBtn'), measureBtn: $('measureBtn'), abortBtn: $('abortBtn'),
   status: $('status'), progressTrack: $('progressTrack'), progressBar: $('progressBar'), progressText: $('progressText'),
@@ -68,7 +72,7 @@ async function init() {
   renderSaved();
   refreshReferenceOptions();
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('./sw.js?v=3.3.0').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=4.0.1').catch(() => {});
   }
 }
 
@@ -262,7 +266,7 @@ async function playMarker() {
     const marker = window.SpeakerDSP.generateMarker(sampleRate, 0.25, 'start');
     const padded = new Float32Array(marker.length + Math.round(sampleRate * 0.18));
     padded.set(marker, Math.round(sampleRate * 0.08));
-    setStatus('開始マーカー（2段チャープ）を再生しています…');
+    setStatus('開始マーカー（Barker符号化チャープ）を再生しています…');
     await playPcmSamples(padded, sampleRate);
     setStatus('マーカー確認が完了しました。');
   } catch (error) {
@@ -278,7 +282,7 @@ function readConfig() {
   if (!(startFreq >= 20 && endFreq > startFreq && endFreq <= 22000)) throw new Error('開始・終了周波数を確認してください。');
   if (!(sweepDuration >= 4 && sweepDuration <= 15)) throw new Error('スイープ時間は4～15秒にしてください。');
   if (!(level >= 0.05 && level <= 0.65)) throw new Error('出力レベルが範囲外です。');
-  const markerLevel = window.SpeakerDSP.clamp(Math.max(level * 1.25, 0.18), 0.12, 0.52);
+  const markerLevel = window.SpeakerDSP.clamp(Math.max(level * 1.25, 0.18), 0.12, 0.50);
   return {
     startFreq,
     endFreq,
@@ -287,6 +291,7 @@ function readConfig() {
     markerLevel,
     smoothing: Number(ui.smoothing.value),
     gateMs: ui.gateMs.value === 'full' ? 'full' : Number(ui.gateMs.value),
+    windowType: ui.windowType.value,
     distanceCm: Number(ui.distanceCm.value),
     speakerType: ui.speakerType.value,
     name: ui.measurementName.value.trim() || `測定 ${new Date().toLocaleString('ja-JP')}`,
@@ -294,10 +299,11 @@ function readConfig() {
     normalize: ui.normalizeMode.value === 'on',
     normalizeLow: 500,
     normalizeHigh: 2000,
-    preRoll: 0.7,
-    markerGap: 0.52,
+    preRoll: 0.65,
+    markerGap: 0.75,
     responseTail: 2.2,
-    postRoll: 0.55,
+    endMarkerGuard: 0.55,
+    postRoll: 0.45,
     calibration,
     calibrationName
   };
@@ -364,7 +370,7 @@ function analyzeRecording(recorded, sampleRate, config) {
           config: { ...config, calibration: undefined }
         };
         setProgress(1, '完了');
-        setStatus('解析が完了しました。同期遅延、インパルス応答、周波数特性を確認してください。');
+        setStatus('解析が完了しました。マーカー分離、信頼帯域、周波数特性、群遅延、時間応答を確認してください。');
         renderSummary();
         updateQualityBadge();
         updateResultButtons();
@@ -539,7 +545,7 @@ function setBusy(value, allowAbort) {
   ui.measureBtn.disabled = disable || !recorderNode;
   ui.abortBtn.disabled = !(value && allowAbort);
   [ui.startFreq, ui.endFreq, ui.duration, ui.level, ui.smoothing, ui.gateMs, ui.distanceCm, ui.speakerType,
-    ui.measurementName, ui.regularizationDb, ui.normalizeMode, ui.calibrationFile].forEach((element) => element.disabled = disable);
+    ui.measurementName, ui.regularizationDb, ui.windowType, ui.normalizeMode, ui.calibrationFile].forEach((element) => element.disabled = disable);
 }
 
 function setStatus(message, isError = false) {
@@ -619,21 +625,33 @@ function renderSummary() {
     return;
   }
   const s = currentResult.summary;
+  const reliableBand = `${formatFrequency(Math.round(s.reliableStartHz || currentResult.config.startFreq))}～${formatFrequency(Math.round(s.reliableEndHz || currentResult.config.endFreq))} Hz`;
   const cards = [
     ['総遅延', formatNumber(s.latencyMs, 1, ' ms')],
     ['開始マーカー', formatNumber(s.startMarkerScore, 3)],
+    ['終了マーカー', s.endMarkerScore == null ? '未検出' : formatNumber(s.endMarkerScore, 3)],
+    ['マーカー混入', s.markerLeakageScore == null ? '検査不能' : `${formatNumber(s.markerLeakageScore, 3)}（低いほど良好）`],
+    ['解析区間余白', s.analysisMarginMs == null ? '終了マーカー未検出' : formatNumber(s.analysisMarginMs, 0, ' ms')],
     ['クロック差', s.driftPpm == null ? '終了マーカー未検出' : `${s.driftPpm >= 0 ? '+' : ''}${formatNumber(s.driftPpm, 0)} ppm`],
     ['同期後残差', formatNumber(s.directArrivalMs, 2, ' ms')],
+    ['信頼帯域', reliableBand],
+    ['実励振帯域', `${formatFrequency(Math.round(s.excitationStartHz))}～${formatFrequency(Math.round(s.excitationEndHz))} Hz`],
+    ['振幅解析', s.magnitudeEngine === 'coherent-ess-tracking' ? 'ESS同期追従' : '—'],
+    ['IR窓', `${escapeHtml(String(s.windowType || '—'))} / ${formatNumber(s.effectiveGateMs, 0, ' ms')}`],
     ['S/N（参考）', formatNumber(s.snrDb, 1, ' dB')],
     ['入力ピーク', formatNumber(s.inputPeakDbfs, 1, ' dBFS')],
     ['クリッピング', formatNumber(s.clippingPercent, 3, ' %')],
-    ['有効時間窓', formatNumber(s.effectiveGateMs, 0, ' ms')],
     ['低域 −3 dB', s.minus3Hz ? formatNumber(s.minus3Hz, 0, ' Hz') : '範囲外'],
     ['低域 −6 dB', s.minus6Hz ? formatNumber(s.minus6Hz, 0, ' Hz') : '範囲外'],
     ['40–200 Hz平均', formatNumber(s.lowBandDb, 1, ' dB')],
     ['4–12 kHz平均', formatNumber(s.highBandDb, 1, ' dB')]
   ];
-  ui.summary.innerHTML = `<div class="summary-grid">${cards.map(([label, value]) => `<div class="summary-card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>
+  const warnings = [];
+  if (s.endFrequencyLimited) warnings.push(`入力サンプルレートのため、${formatFrequency(Math.round(s.reliableEndHz))} Hzより上は信頼帯域外として非表示です。`);
+  if (s.markerLeakageScore > 0.08) warnings.push('終了マーカーに似た成分が解析区間内に検出されました。再測定または出力音量の見直しを推奨します。');
+  if (s.analysisMarginMs != null && s.analysisMarginMs < 120) warnings.push('解析区間と終了マーカーの余白が小さすぎます。');
+  ui.summary.innerHTML = `<div class="summary-grid">${cards.map(([label, value]) => `<div class="summary-card"><small>${escapeHtml(label)}</small><strong>${value}</strong></div>`).join('')}</div>
+    ${warnings.length ? `<div class="analysis-warning">${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join('')}</div>` : ''}
     <p class="summary-note">測定名：${escapeHtml(currentResult.name)} ／ 距離：${escapeHtml(String(currentResult.config.distanceCm))} cm ／ 校正：${escapeHtml(currentResult.config.calibrationName || 'なし')}</p>`;
 }
 
@@ -646,9 +664,9 @@ function updateQualityBadge() {
   const s = currentResult.summary;
   let level = 'good';
   let text = '良好';
-  if (s.clippingPercent > 0.02 || s.startMarkerScore < 0.08 || s.snrDb < 18) {
+  if (s.clippingPercent > 0.02 || s.startMarkerScore < 0.08 || s.snrDb < 18 || s.markerLeakageScore > 0.12) {
     level = 'bad'; text = '再測定推奨';
-  } else if (s.clippingPercent > 0 || s.startMarkerScore < 0.14 || s.snrDb < 28 || s.endMarkerScore == null) {
+  } else if (s.clippingPercent > 0 || s.startMarkerScore < 0.14 || s.snrDb < 28 || s.endMarkerScore == null || s.markerLeakageScore > 0.07 || (s.analysisMarginMs != null && s.analysisMarginMs < 150)) {
     level = 'warn'; text = '要確認';
   }
   ui.qualityBadge.className = `quality-badge ${level}`;
@@ -703,30 +721,171 @@ function drawGraph() {
   ctx.fillStyle = '#020713';
   ctx.fillRect(0, 0, width, height);
 
-  const margin = { left: width < 480 ? 48 : 62, right: 18, top: 24, bottom: 46 };
+  const margin = { left: width < 480 ? 48 : 62, right: currentView === 'decay' ? 48 : 18, top: 24, bottom: 46 };
   const plot = { x: margin.left, y: margin.top, w: width - margin.left - margin.right, h: height - margin.top - margin.bottom };
   const series = collectSeries();
+  if (currentView === 'decay') {
+    const decay = series[0]?.result?.decay;
+    drawDecayHeatmap(ctx, plot, decay);
+    drawLegend(decay ? series : []);
+    ui.graphPngBtn.disabled = !decay;
+    return;
+  }
   const axis = makeAxis(series);
   drawAxes(ctx, plot, axis);
+  drawReliabilityShading(ctx, plot, axis);
   for (const item of series) drawSeries(ctx, plot, axis, item);
   drawLegend(series);
   ui.graphPngBtn.disabled = series.length === 0;
 }
 
+function robustRange(values, fallbackMin, fallbackMax, lowQuantile = 0.03, highQuantile = 0.97, minimumSpan = 1) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return [fallbackMin, fallbackMax];
+  const low = sorted[Math.floor((sorted.length - 1) * lowQuantile)];
+  const high = sorted[Math.ceil((sorted.length - 1) * highQuantile)];
+  const center = (low + high) / 2;
+  const span = Math.max(minimumSpan, (high - low) * 1.25);
+  return [center - span / 2, center + span / 2];
+}
+
+function drawReliabilityShading(ctx, plot, axis) {
+  if (!axis.type?.startsWith('log-frequency') || !currentResult?.summary) return;
+  const low = currentResult.summary.reliableStartHz;
+  const high = currentResult.summary.reliableEndHz;
+  ctx.save();
+  ctx.fillStyle = 'rgba(251, 113, 133, 0.10)';
+  if (Number.isFinite(low) && low > axis.xMin) {
+    const x = mapLog(low, axis.xMin, axis.xMax, plot.x, plot.x + plot.w);
+    ctx.fillRect(plot.x, plot.y, Math.max(0, x - plot.x), plot.h);
+  }
+  if (Number.isFinite(high) && high < axis.xMax) {
+    const x = mapLog(high, axis.xMin, axis.xMax, plot.x, plot.x + plot.w);
+    ctx.fillRect(x, plot.y, Math.max(0, plot.x + plot.w - x), plot.h);
+  }
+  ctx.restore();
+}
+
+function decayColor(valueDb) {
+  const t = Math.max(0, Math.min(1, (valueDb + 60) / 60));
+  const stops = [
+    [0.00, [2, 7, 19]],
+    [0.20, [20, 44, 86]],
+    [0.42, [20, 120, 155]],
+    [0.64, [69, 180, 122]],
+    [0.82, [241, 196, 73]],
+    [1.00, [248, 250, 252]]
+  ];
+  let a = stops[0];
+  let b = stops[stops.length - 1];
+  for (let i = 1; i < stops.length; i++) {
+    if (t <= stops[i][0]) { a = stops[i - 1]; b = stops[i]; break; }
+  }
+  const u = (t - a[0]) / Math.max(1e-9, b[0] - a[0]);
+  const rgb = a[1].map((v, i) => Math.round(v + (b[1][i] - v) * u));
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+
+function drawDecayHeatmap(ctx, plot, decay) {
+  ctx.strokeStyle = '#4b607d';
+  ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+  if (!decay?.valuesDb?.length) {
+    ctx.fillStyle = '#8292a8';
+    ctx.textAlign = 'center';
+    ctx.fillText('時間周波数減衰データがありません', plot.x + plot.w / 2, plot.y + plot.h / 2);
+    return;
+  }
+  const rows = decay.valuesDb.length;
+  const cols = decay.frequencies.length;
+  for (let row = 0; row < rows; row++) {
+    const y0 = plot.y + row / rows * plot.h;
+    const y1 = plot.y + (row + 1) / rows * plot.h;
+    for (let col = 0; col < cols; col++) {
+      const x0 = mapLog(decay.frequencies[col], decay.frequencies[0], decay.frequencies[cols - 1], plot.x, plot.x + plot.w);
+      const nextFrequency = col + 1 < cols ? decay.frequencies[col + 1] : decay.frequencies[col] * (decay.frequencies[col] / decay.frequencies[col - 1]);
+      const x1 = mapLog(nextFrequency, decay.frequencies[0], decay.frequencies[cols - 1], plot.x, plot.x + plot.w);
+      ctx.fillStyle = decayColor(decay.valuesDb[row][col]);
+      ctx.fillRect(x0, y0, Math.max(1, x1 - x0 + 0.5), Math.max(1, y1 - y0 + 0.5));
+    }
+  }
+  ctx.strokeStyle = 'rgba(130,146,168,0.35)';
+  ctx.fillStyle = '#8292a8';
+  ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+  const freqTicks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+  for (const f of freqTicks) {
+    if (f < decay.frequencies[0] || f > decay.frequencies[cols - 1]) continue;
+    const x = mapLog(f, decay.frequencies[0], decay.frequencies[cols - 1], plot.x, plot.x + plot.w);
+    ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.fillText(formatFrequency(f), x, plot.y + plot.h + 20);
+  }
+  const timeMax = decay.timesMs[decay.timesMs.length - 1];
+  for (let i = 0; i <= 5; i++) {
+    const t = timeMax * i / 5;
+    const y = plot.y + t / timeMax * plot.h;
+    ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.w, y); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillText(`${Math.round(t)}`, plot.x - 8, y);
+  }
+  ctx.textAlign = 'left'; ctx.fillText('ms', 8, plot.y - 10);
+  const legendX = plot.x + plot.w + 14;
+  const gradient = ctx.createLinearGradient(0, plot.y + plot.h, 0, plot.y);
+  for (let i = 0; i <= 6; i++) gradient.addColorStop(i / 6, decayColor(-60 + i * 10));
+  ctx.fillStyle = gradient;
+  ctx.fillRect(legendX, plot.y, 12, plot.h);
+  ctx.fillStyle = '#8292a8';
+  ctx.textAlign = 'left';
+  ctx.fillText('0', legendX + 17, plot.y + 4);
+  ctx.fillText('−60', legendX + 17, plot.y + plot.h - 4);
+}
+
 function collectSeries() {
+  if (currentView === 'thd') {
+    const output = [];
+    if (currentResult?.thd?.length) {
+      const harmonicSeries = [
+        ['THD', 'percent', '#f8fafc', 2.5],
+        ['H2', 'h2', '#38bdf8', 1.6],
+        ['H3', 'h3', '#a3e635', 1.6],
+        ['H4', 'h4', '#facc15', 1.4],
+        ['H5', 'h5', '#c084fc', 1.4]
+      ];
+      for (const [label, key, color, width] of harmonicSeries) {
+        const points = currentResult.thd
+          .filter((point) => Number.isFinite(point[key]))
+          .map((point) => ({ f: point.f, value: point[key] }));
+        if (points.length) output.push({ result: currentResult, name: `${currentResult.name} ${label}`, color, width, points });
+      }
+    }
+    let colorIndex = 0;
+    for (const item of savedMeasurements) {
+      if (!selectedSavedIds.has(item.id) || !item.result?.thd?.length) continue;
+      output.push({
+        result: item.result,
+        name: `${item.name} THD`,
+        color: COLORS[colorIndex++ % COLORS.length],
+        width: 1.4,
+        points: item.result.thd.map((point) => ({ f: point.f, value: point.percent }))
+      });
+    }
+    return output;
+  }
+
   const output = [];
   if (currentResult) output.push({ result: currentResult, name: `${currentResult.name}（現在）`, color: '#f8fafc', width: 2.5 });
   let colorIndex = 0;
-  for (const item of savedMeasurements) {
-    if (!selectedSavedIds.has(item.id)) continue;
-    output.push({ result: item.result, name: item.name, color: COLORS[colorIndex++ % COLORS.length], width: 1.7 });
+  if (currentView !== 'decay') {
+    for (const item of savedMeasurements) {
+      if (!selectedSavedIds.has(item.id)) continue;
+      output.push({ result: item.result, name: item.name, color: COLORS[colorIndex++ % COLORS.length], width: 1.7 });
+    }
   }
   return output.map((item) => {
     let points = [];
-    if (currentView === 'magnitude') points = applyReference(item.result.magnitude || []);
-    else if (currentView === 'phase') points = (item.result.phase || []).map((p) => ({ f: p.f, value: p.deg }));
+    if (currentView === 'magnitude') points = applyReference(item.result.magnitude || []).map((p) => ({ ...p, value: p.db }));
+    else if (currentView === 'phase') points = (item.result.phase || []).map((p) => ({ f: p.f, value: p.deg, valid: p.valid }));
+    else if (currentView === 'groupDelay') points = (item.result.groupDelay || []).map((p) => ({ f: p.f, value: p.ms, valid: p.valid }));
     else if (currentView === 'impulse') points = (item.result.impulse || []).map((p) => ({ x: p.tMs, value: p.etcDb }));
-    else if (currentView === 'thd') points = (item.result.thd || []).map((p) => ({ f: p.f, value: p.percent }));
+    else if (currentView === 'step') points = (item.result.step || []).map((p) => ({ x: p.tMs, value: p.value }));
+    else if (currentView === 'decay' && item.result.decay) points = [{ decay: item.result.decay }];
     return { ...item, points };
   }).filter((item) => item.points.length);
 }
@@ -737,14 +896,24 @@ function makeAxis(series) {
     return { type: 'log-frequency', xMin: Number(ui.startFreq.value), xMax: Number(ui.endFreq.value), yMin: -range * 2 / 3, yMax: range / 3, yLabel: 'dB' };
   }
   if (currentView === 'phase') return { type: 'log-frequency', xMin: Number(ui.startFreq.value), xMax: Number(ui.endFreq.value), yMin: -180, yMax: 180, yLabel: 'deg' };
-  if (currentView === 'thd') return { type: 'log-frequency-log-y', xMin: Math.max(30, Number(ui.startFreq.value)), xMax: Math.min(10000, Number(ui.endFreq.value) / 5), yMin: 0.1, yMax: 100, yLabel: '%' };
-  let xMin = -5;
-  let xMax = 200;
-  for (const item of series) {
-    if (item.points.length) xMax = Math.max(xMax, item.points[item.points.length - 1].x || 0);
+  if (currentView === 'groupDelay') {
+    const values = series.flatMap((item) => item.points.filter((p) => p.valid !== false && Number.isFinite(p.value)).map((p) => p.value));
+    const [low, high] = robustRange(values, -10, 50, 0.03, 0.97, 8);
+    const yMin = Math.max(-30, Math.min(140, low));
+    const yMax = Math.max(yMin + 5, Math.min(150, high));
+    return { type: 'log-frequency', xMin: Number(ui.startFreq.value), xMax: Number(ui.endFreq.value), yMin, yMax, yLabel: 'ms' };
   }
+  if (currentView === 'thd') return { type: 'log-frequency-log-y', xMin: Math.max(30, Number(ui.startFreq.value)), xMax: Math.min(10000, Number(ui.endFreq.value) / 5), yMin: 0.1, yMax: 100, yLabel: '%' };
+  if (currentView === 'step') {
+    let xMax = 200;
+    for (const item of series) if (item.points.length) xMax = Math.max(xMax, item.points[item.points.length - 1].x || 0);
+    return { type: 'linear-time', xMin: -5, xMax: Math.min(500, xMax), yMin: -1.15, yMax: 1.15, yLabel: 'relative' };
+  }
+  if (currentView === 'decay') return { type: 'heatmap' };
+  let xMax = 200;
+  for (const item of series) if (item.points.length) xMax = Math.max(xMax, item.points[item.points.length - 1].x || 0);
   xMax = Math.min(600, xMax);
-  return { type: 'linear-time', xMin, xMax, yMin: -80, yMax: 0, yLabel: 'ETC dB' };
+  return { type: 'linear-time', xMin: -5, xMax, yMin: -80, yMax: 0, yLabel: 'ETC dB' };
 }
 
 function drawAxes(ctx, plot, axis) {
@@ -800,12 +969,18 @@ function drawSeries(ctx, plot, axis, item) {
   ctx.beginPath();
   let started = false;
   for (const point of item.points) {
-    const xValue = currentView === 'impulse' ? point.x : point.f;
+    const xValue = (currentView === 'impulse' || currentView === 'step') ? point.x : point.f;
     const yValue = currentView === 'magnitude' ? point.db : point.value;
-    if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) continue;
-    if (xValue < axis.xMin || xValue > axis.xMax) continue;
+    const belowMagnitudeFloor = currentView === 'magnitude' && yValue <= MAGNITUDE_DISPLAY_FLOOR_DB;
+    if (point.valid === false || belowMagnitudeFloor || !Number.isFinite(xValue) || !Number.isFinite(yValue) || xValue < axis.xMin || xValue > axis.xMax) {
+      // −36 dB以下は描画せず、前後の線もつながない。
+      started = false;
+      continue;
+    }
     const x = axis.type.startsWith('log-frequency') ? mapLog(xValue, axis.xMin, axis.xMax, plot.x, plot.x + plot.w) : mapLinear(xValue, axis.xMin, axis.xMax, plot.x, plot.x + plot.w);
-    const y = axis.type === 'log-frequency-log-y' ? mapLog(Math.max(axis.yMin, yValue), axis.yMin, axis.yMax, plot.y + plot.h, plot.y) : mapLinear(yValue, axis.yMin, axis.yMax, plot.y + plot.h, plot.y);
+    const y = axis.type === 'log-frequency-log-y'
+      ? mapLog(Math.max(axis.yMin, yValue), axis.yMin, axis.yMax, plot.y + plot.h, plot.y)
+      : mapLinear(yValue, axis.yMin, axis.yMax, plot.y + plot.h, plot.y);
     if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
   }
   ctx.stroke();
@@ -926,7 +1101,7 @@ function exportGraphPng() {
 
     const dataUrl = canvas.toDataURL('image/png');
     const blob = dataUrlToBlob(dataUrl);
-    const viewSlug = { magnitude: 'frequency', phase: 'phase', impulse: 'impulse-etc', thd: 'thd' }[currentView] || 'graph';
+    const viewSlug = { magnitude: 'frequency', phase: 'phase', groupDelay: 'group-delay', impulse: 'impulse-etc', step: 'step-response', decay: 'decay-map', thd: 'thd-harmonics' }[currentView] || 'graph';
     const baseName = currentResult?.name || series[0]?.name || 'speaker-measurement';
     const filename = `${safeFilename(baseName)}-${viewSlug}.png`;
 
@@ -984,17 +1159,22 @@ function renderExportGraph(ctx, width, height, series) {
   if (sourceResult?.createdAt) metaParts.push(new Date(sourceResult.createdAt).toLocaleString('ja-JP'));
   if (sourceResult?.config?.distanceCm != null) metaParts.push(`距離 ${sourceResult.config.distanceCm} cm`);
   if (sourceResult?.config?.speakerType) metaParts.push(sourceResult.config.speakerType);
-  if (currentView === 'magnitude' && sourceResult?.config?.smoothing) metaParts.push(`平滑化 ${sourceResult.config.smoothing}`);
+  if (currentView === 'magnitude' && sourceResult?.config?.smoothing) metaParts.push(`平滑化 1/${sourceResult.config.smoothing} oct`);
+  if (sourceResult?.summary?.reliableEndHz) metaParts.push(`信頼上限 ${formatFrequency(Math.round(sourceResult.summary.reliableEndHz))} Hz`);
   const referenceName = getReferenceName();
   if (referenceName && currentView === 'magnitude') metaParts.push(`差分基準 ${referenceName}`);
   ctx.fillText(metaParts.join('  ／  '), 56, 100);
 
-  const plot = { x: 76, y: 126, w: width - 112, h: 466 };
-  const axis = makeAxis(series);
-  drawAxes(ctx, plot, axis);
-  for (const item of series) drawSeries(ctx, plot, axis, item);
-
-  drawExportLegend(ctx, series, 76, 622, width - 112);
+  const plot = { x: 76, y: 126, w: width - (currentView === 'decay' ? 150 : 112), h: 466 };
+  if (currentView === 'decay') {
+    drawDecayHeatmap(ctx, plot, sourceResult?.decay);
+  } else {
+    const axis = makeAxis(series);
+    drawAxes(ctx, plot, axis);
+    drawReliabilityShading(ctx, plot, axis);
+    for (const item of series) drawSeries(ctx, plot, axis, item);
+    drawExportLegend(ctx, series, 76, 622, width - 112);
+  }
 
   ctx.fillStyle = '#73849c';
   ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
@@ -1044,27 +1224,35 @@ function dataUrlToBlob(dataUrl) {
 
 function exportCsv() {
   if (!currentResult) return;
+  const s = currentResult.summary;
   const lines = [
     `# Speaker Measure Pro ${VERSION}`,
     `# name,${csvEscape(currentResult.name)}`,
     `# created_at,${currentResult.createdAt}`,
     `# sample_rate,${currentResult.sampleRate}`,
-    `# latency_ms,${currentResult.summary.latencyMs}`,
-    `# marker_score,${currentResult.summary.startMarkerScore}`,
-    `# drift_ppm,${currentResult.summary.driftPpm ?? ''}`,
+    `# latency_ms,${s.latencyMs}`,
+    `# start_marker_score,${s.startMarkerScore}`,
+    `# end_marker_score,${s.endMarkerScore ?? ''}`,
+    `# marker_leakage_score,${s.markerLeakageScore ?? ''}`,
+    `# drift_ppm,${s.driftPpm ?? ''}`,
+    `# reliable_band_hz,${s.reliableStartHz},${s.reliableEndHz}`,
+    `# excitation_band_hz,${s.excitationStartHz},${s.excitationEndHz}`,
     '',
     '[frequency_response]',
-    'frequency_hz,magnitude_db,phase_deg,thd_percent'
+    'frequency_hz,magnitude_db,valid,reference_support_db,phase_deg,phase_unwrapped_deg,group_delay_ms,thd_percent,h2_percent,h3_percent,h4_percent,h5_percent'
   ];
   const thd = currentResult.thd || [];
   for (let i = 0; i < currentResult.magnitude.length; i++) {
     const mag = currentResult.magnitude[i];
     const phase = currentResult.phase[i];
+    const gd = currentResult.groupDelay?.[i];
     const nearestThd = thd.length ? thd.reduce((best, p) => Math.abs(Math.log(p.f / mag.f)) < Math.abs(Math.log(best.f / mag.f)) ? p : best, thd[0]) : null;
-    lines.push(`${mag.f},${mag.db},${phase?.deg ?? ''},${nearestThd?.percent ?? ''}`);
+    lines.push(`${mag.f},${mag.db},${mag.valid !== false},${mag.supportDb ?? ''},${phase?.deg ?? ''},${phase?.unwrappedDeg ?? ''},${gd?.ms ?? ''},${nearestThd?.percent ?? ''},${nearestThd?.h2 ?? ''},${nearestThd?.h3 ?? ''},${nearestThd?.h4 ?? ''},${nearestThd?.h5 ?? ''}`);
   }
   lines.push('', '[impulse_etc]', 'time_ms,normalized_impulse,etc_db');
-  for (const point of currentResult.impulse) lines.push(`${point.tMs},${point.value},${point.etcDb}`);
+  for (const point of currentResult.impulse || []) lines.push(`${point.tMs},${point.value},${point.etcDb}`);
+  lines.push('', '[step_response]', 'time_ms,normalized_step');
+  for (const point of currentResult.step || []) lines.push(`${point.tMs},${point.value}`);
   downloadBlob(new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' }), `${safeFilename(currentResult.name)}.csv`);
 }
 

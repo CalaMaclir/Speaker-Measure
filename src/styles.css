@@ -133,3 +133,117 @@ footer { padding: 20px 0 max(28px, env(safe-area-inset-bottom)); color: #64748b;
   .summary-grid { grid-template-columns: 1fr 1fr; }
   .canvas-wrap { min-height: 360px; height: 58vh; }
 }
+.analysis-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(250, 204, 21, .35);
+  border-radius: 10px;
+  background: rgba(113, 63, 18, .16);
+  color: #fde68a;
+  font-size: .78rem;
+  line-height: 1.55;
+}
+.analysis-warning p + p { margin-top: 4px; }
+
+
+/* v4.0.1: iPhone向け横はみ出し防止 */
+html, body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+header, main, footer,
+.panel, .section-heading, .section-heading > *,
+.form-grid, .form-grid > *, .advanced-grid > *,
+.monitor-grid, .monitor-block, .monitor-label,
+.device-info, .device-info > *,
+.graph-panel, .graph-heading, .export-buttons,
+.reference-row, .reference-row > *,
+.canvas-wrap, .legend, .summary, .summary-grid,
+.saved-list, .saved-item, .saved-item > * {
+  min-width: 0;
+  max-width: 100%;
+}
+input, select, button, output {
+  min-width: 0;
+  max-width: 100%;
+}
+label span {
+  min-width: 0;
+  max-width: 100%;
+}
+label span > input[type="number"],
+label span > input[type="range"] {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+label span > output {
+  flex: 0 0 auto;
+}
+.lead, .hint, .status, .monitor-help,
+.section-heading p, .reference-row > span,
+.summary, .saved-item small, .notes-panel li {
+  overflow-wrap: anywhere;
+}
+.saved-item {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.view-tabs {
+  width: 100%;
+  max-width: 100%;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 820px) {
+  .method-badge {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .graph-heading .export-buttons {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  header, main, footer {
+    width: min(100% - 18px, 1160px);
+  }
+  h1 {
+    font-size: clamp(1.85rem, 12vw, 3rem);
+    overflow-wrap: anywhere;
+  }
+  .device-info,
+  .summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .button-row,
+  .export-buttons {
+    width: 100%;
+  }
+  .button-row > button,
+  .export-buttons > button,
+  .calibration-row > button,
+  .calibration-row > .file-button {
+    flex: 1 1 calc(50% - 6px);
+    width: auto;
+  }
+  .reference-row label {
+    width: 100%;
+  }
+  .saved-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .saved-item > button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .canvas-wrap {
+    width: 100%;
+    max-width: 100%;
+  }
+}
