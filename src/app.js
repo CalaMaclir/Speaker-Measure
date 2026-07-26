@@ -1,9 +1,25 @@
-const VERSION = '4.0.2';
+const VERSION = '4.1.0';
 const DB_NAME = 'speaker-measure-pro';
 const DB_VERSION = 1;
 const STORE_NAME = 'measurements';
 const COLORS = ['#38bdf8', '#a3e635', '#facc15', '#c084fc', '#fb7185', '#2dd4bf', '#f97316', '#818cf8'];
 const MAGNITUDE_DISPLAY_FLOOR_DB = -36;
+const REPORT_PAGE_WIDTH = 1400;
+const REPORT_PAGE_HEIGHT = 990;
+const REPORT_VIEWS = ['magnitude', 'phase', 'groupDelay', 'impulse', 'step', 'decay', 'thd'];
+const SPEAKER_TYPE_LABELS = {
+  'bass-reflex': '自作バスレフ',
+  sealed: '密閉型',
+  'transmission-line': 'TL / MTL',
+  'open-baffle': '平面バッフル',
+  commercial: '市販スピーカー',
+  other: 'その他'
+};
+const WINDOW_TYPE_LABELS = {
+  'blackman-harris': 'Blackman-Harris 4-term',
+  hann: 'Hann',
+  tukey: 'Tukey / cosine edge'
+};
 const VIEW_LABELS = {
   magnitude: 'ガード帯域補正済み相対周波数特性',
   phase: '直接音遅延を除去したラップ位相',
@@ -26,7 +42,7 @@ const ui = {
   status: $('status'), progressTrack: $('progressTrack'), progressBar: $('progressBar'), progressText: $('progressText'),
   meterTrack: $('meterTrack'), meter: $('meter'), meterText: $('meterText'), qualityBadge: $('qualityBadge'), deviceInfo: $('deviceInfo'),
   outputAudio: $('outputAudio'), canvas: $('responseCanvas'), graphSubtitle: $('graphSubtitle'), legend: $('legend'), summary: $('resultSummary'),
-  saveBtn: $('saveBtn'), graphPngBtn: $('graphPngBtn'), csvBtn: $('csvBtn'), jsonBtn: $('jsonBtn'), wavBtn: $('wavBtn'),
+  saveBtn: $('saveBtn'), pdfBtn: $('pdfBtn'), graphPngBtn: $('graphPngBtn'), csvBtn: $('csvBtn'), jsonBtn: $('jsonBtn'), wavBtn: $('wavBtn'),
   referenceSelect: $('referenceSelect'), savedList: $('savedList'), deleteAllBtn: $('deleteAllBtn')
 };
 
@@ -72,7 +88,7 @@ async function init() {
   renderSaved();
   refreshReferenceOptions();
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('./sw.js?v=4.0.2').catch(() => {});
+    navigator.serviceWorker.register(`./sw.js?v=${VERSION}`).catch(() => {});
   }
 }
 
@@ -84,6 +100,7 @@ function bindEvents() {
   ui.measureBtn.addEventListener('click', measure);
   ui.abortBtn.addEventListener('click', abortMeasurement);
   ui.saveBtn.addEventListener('click', saveCurrent);
+  ui.pdfBtn.addEventListener('click', exportPdfReport);
   ui.graphPngBtn.addEventListener('click', exportGraphPng);
   ui.csvBtn.addEventListener('click', exportCsv);
   ui.jsonBtn.addEventListener('click', exportJson);
@@ -613,6 +630,7 @@ function setView(view) {
 function updateResultButtons() {
   const hasResult = Boolean(currentResult);
   ui.saveBtn.disabled = !hasResult;
+  ui.pdfBtn.disabled = !hasResult;
   ui.graphPngBtn.disabled = collectSeries().length === 0;
   ui.csvBtn.disabled = !hasResult;
   ui.jsonBtn.disabled = !hasResult;
@@ -655,22 +673,39 @@ function renderSummary() {
     <p class="summary-note">測定名：${escapeHtml(currentResult.name)} ／ 距離：${escapeHtml(String(currentResult.config.distanceCm))} cm ／ 校正：${escapeHtml(currentResult.config.calibrationName || 'なし')}</p>`;
 }
 
+function assessMeasurementQuality(result) {
+  if (!result?.summary) return { level: 'neutral', text: '未測定' };
+  const s = result.summary;
+  if (s.clippingPercent > 0.02 || s.startMarkerScore < 0.08 || s.snrDb < 18 || s.markerLeakageScore > 0.12) {
+    return { level: 'bad', text: '再測定推奨' };
+  }
+  if (s.clippingPercent > 0 || s.startMarkerScore < 0.14 || s.snrDb < 28 || s.endMarkerScore == null || s.markerLeakageScore > 0.07 || (s.analysisMarginMs != null && s.analysisMarginMs < 150)) {
+    return { level: 'warn', text: '要確認' };
+  }
+  return { level: 'good', text: '良好' };
+}
+
+function getMeasurementWarnings(result) {
+  if (!result?.summary) return [];
+  const s = result.summary;
+  const warnings = [];
+  if (s.endFrequencyLimited) warnings.push(`入力サンプルレートのため、${formatFrequency(Math.round(s.reliableEndHz))} Hzより上は信頼帯域外として非表示です。`);
+  if (s.markerLeakageScore > 0.08) warnings.push('終了マーカーに似た成分が解析区間内に検出されました。再測定または出力音量の見直しを推奨します。');
+  if (s.analysisMarginMs != null && s.analysisMarginMs < 120) warnings.push('解析区間と終了マーカーの余白が小さすぎます。');
+  if (s.clippingPercent > 0.02) warnings.push('入力クリッピングが検出されています。出力レベルまたはマイク入力レベルを下げてください。');
+  if (s.snrDb < 18) warnings.push('S/Nが低いため、静かな環境または高い測定レベルでの再測定を推奨します。');
+  return warnings;
+}
+
 function updateQualityBadge() {
   if (!currentResult) {
     ui.qualityBadge.className = 'quality-badge neutral';
     ui.qualityBadge.textContent = '待機中';
     return;
   }
-  const s = currentResult.summary;
-  let level = 'good';
-  let text = '良好';
-  if (s.clippingPercent > 0.02 || s.startMarkerScore < 0.08 || s.snrDb < 18 || s.markerLeakageScore > 0.12) {
-    level = 'bad'; text = '再測定推奨';
-  } else if (s.clippingPercent > 0 || s.startMarkerScore < 0.14 || s.snrDb < 28 || s.endMarkerScore == null || s.markerLeakageScore > 0.07 || (s.analysisMarginMs != null && s.analysisMarginMs < 150)) {
-    level = 'warn'; text = '要確認';
-  }
-  ui.qualityBadge.className = `quality-badge ${level}`;
-  ui.qualityBadge.textContent = text;
+  const quality = assessMeasurementQuality(currentResult);
+  ui.qualityBadge.className = `quality-badge ${quality.level}`;
+  ui.qualityBadge.textContent = quality.text;
 }
 
 function formatNumber(value, digits = 1, suffix = '') {
@@ -1084,6 +1119,320 @@ async function deleteAllSaved() {
 }
 
 
+function exportPdfReport() {
+  if (!currentResult) return;
+  if (!window.SpeakerPdf?.buildRasterPdf) {
+    setStatus('PDF作成モジュールを読み込めませんでした。ページを再読み込みしてください。', true);
+    return;
+  }
+
+  ui.pdfBtn.disabled = true;
+  setStatus('設定、解析概要、全グラフをPDFレポートへまとめています…');
+
+  try {
+    const totalPages = REPORT_VIEWS.length + 1;
+    const pages = [];
+    let pageCanvas = renderReportSummaryPage(1, totalPages);
+    pages.push({
+      jpegBytes: canvasToJpegBytes(pageCanvas, 0.90),
+      pixelWidth: pageCanvas.width,
+      pixelHeight: pageCanvas.height
+    });
+    pageCanvas.width = 1;
+    pageCanvas.height = 1;
+
+    for (let index = 0; index < REPORT_VIEWS.length; index++) {
+      pageCanvas = renderReportGraphPage(REPORT_VIEWS[index], index + 2, totalPages);
+      pages.push({
+        jpegBytes: canvasToJpegBytes(pageCanvas, 0.90),
+        pixelWidth: pageCanvas.width,
+        pixelHeight: pageCanvas.height
+      });
+      pageCanvas.width = 1;
+      pageCanvas.height = 1;
+    }
+    const pdfBytes = window.SpeakerPdf.buildRasterPdf(pages, {
+      version: VERSION,
+      createdAt: new Date()
+    });
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const filename = `${safeFilename(currentResult.name)}-measurement-report.pdf`;
+
+    if (typeof File === 'function' && navigator.share && navigator.canShare) {
+      const file = new File([blob], filename, { type: 'application/pdf' });
+      let fileShareSupported = false;
+      try {
+        fileShareSupported = navigator.canShare({ files: [file] });
+      } catch {
+        fileShareSupported = false;
+      }
+      if (fileShareSupported) {
+        navigator.share({
+          files: [file],
+          title: `${currentResult.name} 測定レポート`,
+          text: 'Speaker Measure Proの測定設定・解析結果PDF'
+        }).then(() => {
+          setStatus('PDFレポートを共有しました。');
+        }).catch((error) => {
+          if (error?.name === 'AbortError') {
+            setStatus('PDFレポートの共有をキャンセルしました。');
+            return;
+          }
+          downloadBlob(blob, filename);
+          setStatus('共有機能を利用できなかったため、PDFをダウンロードしました。');
+        });
+        return;
+      }
+    }
+
+    downloadBlob(blob, filename);
+    setStatus(`全${totalPages}ページのPDFレポートを保存しました。`);
+  } catch (error) {
+    setStatus(`PDFレポートの作成に失敗しました：${error.message}`, true);
+  } finally {
+    updateResultButtons();
+  }
+}
+
+function renderReportSummaryPage(pageNumber, totalPages) {
+  const canvas = document.createElement('canvas');
+  canvas.width = REPORT_PAGE_WIDTH;
+  canvas.height = REPORT_PAGE_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  const result = currentResult;
+  const config = result.config || {};
+  const summary = result.summary || {};
+  const quality = assessMeasurementQuality(result);
+  const warnings = getMeasurementWarnings(result);
+
+  const background = ctx.createLinearGradient(0, 0, REPORT_PAGE_WIDTH, REPORT_PAGE_HEIGHT);
+  background.addColorStop(0, '#07101e');
+  background.addColorStop(1, '#020713');
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, REPORT_PAGE_WIDTH, REPORT_PAGE_HEIGHT);
+
+  ctx.fillStyle = '#38bdf8';
+  ctx.font = '700 18px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SPEAKER ACOUSTIC MEASUREMENT REPORT', 54, 48);
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 38px -apple-system, BlinkMacSystemFont, sans-serif';
+  drawFittedText(ctx, result.name || 'Speaker measurement', 54, 95, 960, 38, 25);
+  ctx.fillStyle = '#93a4ba';
+  ctx.font = '18px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(`${new Date(result.createdAt).toLocaleString('ja-JP')}  /  Speaker Measure Pro ${VERSION}`, 56, 126);
+
+  const qualityColors = { good: '#4ade80', warn: '#facc15', bad: '#fb7185', neutral: '#93a4ba' };
+  const badgeWidth = 190;
+  ctx.fillStyle = 'rgba(7, 16, 30, 0.92)';
+  ctx.strokeStyle = qualityColors[quality.level] || qualityColors.neutral;
+  ctx.lineWidth = 2;
+  ctx.fillRect(REPORT_PAGE_WIDTH - badgeWidth - 54, 61, badgeWidth, 54);
+  ctx.strokeRect(REPORT_PAGE_WIDTH - badgeWidth - 54, 61, badgeWidth, 54);
+  ctx.fillStyle = qualityColors[quality.level] || qualityColors.neutral;
+  ctx.font = '700 22px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(quality.text, REPORT_PAGE_WIDTH - badgeWidth / 2 - 54, 96);
+
+  const settings = [
+    ['測定日時', new Date(result.createdAt).toLocaleString('ja-JP')],
+    ['スピーカー種別', SPEAKER_TYPE_LABELS[config.speakerType] || config.speakerType || '—'],
+    ['測定距離', formatNumber(config.distanceCm, 0, ' cm')],
+    ['測定周波数', `${formatFrequency(config.startFreq)}～${formatFrequency(config.endFreq)} Hz`],
+    ['スイープ時間', formatNumber(config.sweepDuration, 1, ' 秒')],
+    ['出力レベル', Number.isFinite(config.level) ? `${Math.round(config.level * 100)} %` : '—'],
+    ['平滑化', config.smoothing ? `1/${config.smoothing} octave` : 'なし'],
+    ['時間窓', config.gateMs === 'full' ? '全残響' : formatNumber(config.gateMs, 0, ' ms')],
+    ['IR窓関数', WINDOW_TYPE_LABELS[config.windowType] || config.windowType || '—'],
+    ['正則化', formatNumber(config.regularizationDb, 0, ' dB')],
+    ['正規化', config.normalize === false ? 'なし' : '500 Hz～2 kHz平均を0 dB'],
+    ['マイク校正', config.calibrationName || 'なし'],
+    ['サンプルレート', formatNumber(result.sampleRate, 0, ' Hz')],
+    ['比較表示', selectedSavedIds.size ? `${selectedSavedIds.size}件を重ね表示` : 'なし']
+  ];
+  const results = [
+    ['総遅延', formatNumber(summary.latencyMs, 1, ' ms')],
+    ['開始マーカー', formatNumber(summary.startMarkerScore, 3)],
+    ['終了マーカー', summary.endMarkerScore == null ? '未検出' : formatNumber(summary.endMarkerScore, 3)],
+    ['マーカー混入', summary.markerLeakageScore == null ? '検査不能' : formatNumber(summary.markerLeakageScore, 3)],
+    ['解析区間余白', summary.analysisMarginMs == null ? '—' : formatNumber(summary.analysisMarginMs, 0, ' ms')],
+    ['クロック差', summary.driftPpm == null ? '—' : `${summary.driftPpm >= 0 ? '+' : ''}${formatNumber(summary.driftPpm, 0, ' ppm')}`],
+    ['同期後残差', formatNumber(summary.directArrivalMs, 2, ' ms')],
+    ['信頼帯域', `${formatFrequency(Math.round(summary.reliableStartHz || config.startFreq))}～${formatFrequency(Math.round(summary.reliableEndHz || config.endFreq))} Hz`],
+    ['実励振帯域', `${formatFrequency(Math.round(summary.excitationStartHz))}～${formatFrequency(Math.round(summary.excitationEndHz))} Hz`],
+    ['S/N（参考）', formatNumber(summary.snrDb, 1, ' dB')],
+    ['入力ピーク', formatNumber(summary.inputPeakDbfs, 1, ' dBFS')],
+    ['クリッピング', formatNumber(summary.clippingPercent, 3, ' %')],
+    ['低域 −3 dB', summary.minus3Hz ? formatNumber(summary.minus3Hz, 0, ' Hz') : '範囲外'],
+    ['低域 −6 dB', summary.minus6Hz ? formatNumber(summary.minus6Hz, 0, ' Hz') : '範囲外'],
+    ['40～200 Hz平均', formatNumber(summary.lowBandDb, 1, ' dB')],
+    ['4～12 kHz平均', formatNumber(summary.highBandDb, 1, ' dB')],
+    ['振幅解析', summary.magnitudeEngine === 'coherent-ess-tracking' ? 'ESS同期追従' : '—'],
+    ['差分基準', getReferenceName() || 'なし']
+  ];
+
+  drawReportPanel(ctx, 48, 160, 636, 548, '測定条件', settings, 2);
+  drawReportPanel(ctx, 716, 160, 636, 548, '解析概要', results, 2);
+
+  ctx.fillStyle = 'rgba(7, 16, 30, 0.90)';
+  ctx.strokeStyle = warnings.length ? 'rgba(250, 204, 21, 0.55)' : 'rgba(74, 222, 128, 0.42)';
+  ctx.lineWidth = 1.5;
+  ctx.fillRect(48, 734, 1304, 184);
+  ctx.strokeRect(48, 734, 1304, 184);
+  ctx.fillStyle = warnings.length ? '#fde68a' : '#bbf7d0';
+  ctx.font = '700 21px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(warnings.length ? '測定上の注意' : '測定品質', 72, 770);
+  const noteLines = warnings.length ? warnings : ['解析上の重大な警告は検出されていません。グラフの信頼帯域外、測定環境、マイク特性を考慮して評価してください。'];
+  ctx.fillStyle = '#dbe7f4';
+  ctx.font = '17px -apple-system, BlinkMacSystemFont, sans-serif';
+  let noteY = 805;
+  for (const note of noteLines.slice(0, 4)) {
+    const lines = wrapCanvasText(ctx, `• ${note}`, 1230);
+    for (const line of lines.slice(0, 2)) {
+      ctx.fillText(line, 76, noteY);
+      noteY += 25;
+      if (noteY > 895) break;
+    }
+    if (noteY > 895) break;
+  }
+
+  drawReportPageNumber(ctx, pageNumber, totalPages);
+  return canvas;
+}
+
+function drawReportPanel(ctx, x, y, width, height, title, items, columns = 2) {
+  ctx.fillStyle = 'rgba(7, 16, 30, 0.88)';
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+  ctx.lineWidth = 1.5;
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeRect(x, y, width, height);
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 24px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(title, x + 24, y + 39);
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.38)';
+  ctx.beginPath();
+  ctx.moveTo(x + 24, y + 56);
+  ctx.lineTo(x + width - 24, y + 56);
+  ctx.stroke();
+
+  const perColumn = Math.ceil(items.length / columns);
+  const innerWidth = width - 48;
+  const columnWidth = innerWidth / columns;
+  const rowHeight = Math.min(51, (height - 80) / perColumn);
+  for (let index = 0; index < items.length; index++) {
+    const column = Math.floor(index / perColumn);
+    const row = index % perColumn;
+    const itemX = x + 24 + column * columnWidth;
+    const itemY = y + 86 + row * rowHeight;
+    const [label, value] = items[index];
+    ctx.fillStyle = '#93a4ba';
+    ctx.font = '15px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillText(label, itemX, itemY);
+    ctx.fillStyle = '#edf4fc';
+    ctx.font = '600 18px -apple-system, BlinkMacSystemFont, sans-serif';
+    drawFittedText(ctx, value, itemX, itemY + 23, columnWidth - 20, 18, 12);
+  }
+}
+
+function drawFittedText(ctx, text, x, y, maxWidth, initialSize, minimumSize) {
+  const value = String(text ?? '—');
+  let size = initialSize;
+  const weight = /700|800/.test(ctx.font) ? '700' : '600';
+  while (size > minimumSize && ctx.measureText(value).width > maxWidth) {
+    size -= 1;
+    ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  }
+  if (ctx.measureText(value).width <= maxWidth) {
+    ctx.fillText(value, x, y);
+    return;
+  }
+  let clipped = value;
+  while (clipped.length > 1 && ctx.measureText(`${clipped}…`).width > maxWidth) clipped = clipped.slice(0, -1);
+  ctx.fillText(`${clipped}…`, x, y);
+}
+
+function wrapCanvasText(ctx, text, maxWidth) {
+  const characters = Array.from(String(text));
+  const lines = [];
+  let line = '';
+  for (const character of characters) {
+    const candidate = line + character;
+    if (line && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = character;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function renderReportGraphPage(view, pageNumber, totalPages) {
+  const canvas = document.createElement('canvas');
+  canvas.width = REPORT_PAGE_WIDTH;
+  canvas.height = REPORT_PAGE_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#020713';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const graphCanvas = document.createElement('canvas');
+  graphCanvas.width = 1250;
+  graphCanvas.height = 900;
+  const graphCtx = graphCanvas.getContext('2d');
+  graphCtx.scale(1.25, 1.25);
+  const previousView = currentView;
+  const previousStartFreq = ui.startFreq.value;
+  const previousEndFreq = ui.endFreq.value;
+  try {
+    currentView = view;
+    if (Number.isFinite(currentResult?.config?.startFreq)) ui.startFreq.value = String(currentResult.config.startFreq);
+    if (Number.isFinite(currentResult?.config?.endFreq)) ui.endFreq.value = String(currentResult.config.endFreq);
+    const series = collectSeries();
+    renderExportGraph(graphCtx, 1000, 720, series);
+  } finally {
+    currentView = previousView;
+    ui.startFreq.value = previousStartFreq;
+    ui.endFreq.value = previousEndFreq;
+  }
+
+  const targetHeight = REPORT_PAGE_HEIGHT;
+  const targetWidth = graphCanvas.width / graphCanvas.height * targetHeight;
+  ctx.drawImage(graphCanvas, (REPORT_PAGE_WIDTH - targetWidth) / 2, 0, targetWidth, targetHeight);
+  drawReportPageNumber(ctx, pageNumber, totalPages);
+  return canvas;
+}
+
+function drawReportPageNumber(ctx, pageNumber, totalPages) {
+  const boxWidth = 84;
+  const boxHeight = 36;
+  const x = REPORT_PAGE_WIDTH - boxWidth - 22;
+  const y = REPORT_PAGE_HEIGHT - boxHeight - 18;
+  ctx.fillStyle = 'rgba(2, 7, 19, 0.84)';
+  ctx.fillRect(x, y, boxWidth, boxHeight);
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+  ctx.strokeRect(x, y, boxWidth, boxHeight);
+  ctx.fillStyle = '#a9b8ca';
+  ctx.font = '600 16px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${pageNumber} / ${totalPages}`, x + boxWidth / 2, y + 24);
+}
+
+function canvasToJpegBytes(canvas, quality = 0.90) {
+  return dataUrlToBytes(canvas.toDataURL('image/jpeg', quality));
+}
+
+function dataUrlToBytes(dataUrl) {
+  const encoded = dataUrl.split(',')[1] || '';
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+
 function exportGraphPng() {
   const series = collectSeries();
   if (!series.length) return;
@@ -1214,12 +1563,9 @@ function getReferenceName() {
 }
 
 function dataUrlToBlob(dataUrl) {
-  const [header, encoded] = dataUrl.split(',');
+  const header = dataUrl.split(',')[0];
   const mime = header.match(/data:([^;]+)/)?.[1] || 'application/octet-stream';
-  const binary = atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
+  return new Blob([dataUrlToBytes(dataUrl)], { type: mime });
 }
 
 function exportCsv() {

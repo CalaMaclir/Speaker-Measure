@@ -9,8 +9,9 @@
   <meta name="apple-mobile-web-app-title" content="Speaker Measure Pro">
   <title>Speaker Measure Pro</title>
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=4.0.2">
-  <script src="dsp-core.js?v=4.0.2"></script>
+  <link rel="stylesheet" href="styles.css?v=4.1.0">
+  <script src="dsp-core.js?v=4.1.0"></script>
+  <script src="pdf-report.js?v=4.1.0"></script>
 </head>
 <body>
   <audio id="outputAudio" class="output-audio" playsinline preload="auto" aria-hidden="true"></audio>
@@ -23,7 +24,7 @@
     </div>
     <div class="header-badges">
       <span id="secureBadge" class="badge">環境確認中</span>
-      <span class="badge version">v4.0.2</span>
+      <span class="badge version">v4.1.0</span>
     </div>
   </header>
 
@@ -194,6 +195,7 @@
         </div>
         <div class="button-row compact export-buttons">
           <button id="saveBtn" disabled>測定保存</button>
+          <button id="pdfBtn" class="report-button" disabled>PDFレポート</button>
           <button id="graphPngBtn" disabled>グラフ画像</button>
           <button id="csvBtn" disabled>解析CSV</button>
           <button id="jsonBtn" disabled>JSON</button>
@@ -247,7 +249,7 @@
     </section>
   </main>
 
-  <footer>Speaker Measure Pro 4.0.2 — local-first / no upload</footer>
-  <script type="module" src="app.js?v=4.0.2"></script>
+  <footer>Speaker Measure Pro 4.1.0 — local-first / no upload</footer>
+  <script type="module" src="app.js?v=4.1.0"></script>
 </body>
 </html>

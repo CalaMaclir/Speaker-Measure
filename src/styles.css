@@ -290,3 +290,13 @@ html {
     font-size: .88rem;
   }
 }
+
+/* v4.1.0: PDF測定レポート */
+button.report-button {
+  background: #164e63;
+  border-color: #0891b2;
+  color: #ecfeff;
+}
+button.report-button:hover:not(:disabled) {
+  border-color: #22d3ee;
+}

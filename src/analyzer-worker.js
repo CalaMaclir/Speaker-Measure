@@ -1,5 +1,5 @@
 'use strict';
-importScripts('./dsp-core.js?v=4.0.2');
+importScripts('./dsp-core.js?v=4.1.0');
 
 self.onmessage = (event) => {
   try {
