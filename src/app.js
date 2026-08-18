@@ -1,4 +1,4 @@
-const VERSION = '4.1.0';
+const VERSION = '4.1.1';
 const DB_NAME = 'speaker-measure-pro';
 const DB_VERSION = 1;
 const STORE_NAME = 'measurements';
@@ -784,12 +784,12 @@ function robustRange(values, fallbackMin, fallbackMax, lowQuantile = 0.03, highQ
   return [center - span / 2, center + span / 2];
 }
 
-function drawReliabilityShading(ctx, plot, axis) {
+function drawReliabilityShading(ctx, plot, axis, theme = null) {
   if (!axis.type?.startsWith('log-frequency') || !currentResult?.summary) return;
   const low = currentResult.summary.reliableStartHz;
   const high = currentResult.summary.reliableEndHz;
   ctx.save();
-  ctx.fillStyle = 'rgba(251, 113, 133, 0.10)';
+  ctx.fillStyle = theme?.unreliableFill || 'rgba(251, 113, 133, 0.10)';
   if (Number.isFinite(low) && low > axis.xMin) {
     const x = mapLog(low, axis.xMin, axis.xMax, plot.x, plot.x + plot.w);
     ctx.fillRect(plot.x, plot.y, Math.max(0, x - plot.x), plot.h);
@@ -821,11 +821,14 @@ function decayColor(valueDb) {
   return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 }
 
-function drawDecayHeatmap(ctx, plot, decay) {
-  ctx.strokeStyle = '#4b607d';
+function drawDecayHeatmap(ctx, plot, decay, theme = null) {
+  const borderColor = theme?.border || '#4b607d';
+  const axisTextColor = theme?.axisText || '#8292a8';
+  const gridColor = theme?.decayGrid || 'rgba(130,146,168,0.35)';
+  ctx.strokeStyle = borderColor;
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
   if (!decay?.valuesDb?.length) {
-    ctx.fillStyle = '#8292a8';
+    ctx.fillStyle = axisTextColor;
     ctx.textAlign = 'center';
     ctx.fillText('時間周波数減衰データがありません', plot.x + plot.w / 2, plot.y + plot.h / 2);
     return;
@@ -843,8 +846,8 @@ function drawDecayHeatmap(ctx, plot, decay) {
       ctx.fillRect(x0, y0, Math.max(1, x1 - x0 + 0.5), Math.max(1, y1 - y0 + 0.5));
     }
   }
-  ctx.strokeStyle = 'rgba(130,146,168,0.35)';
-  ctx.fillStyle = '#8292a8';
+  ctx.strokeStyle = gridColor;
+  ctx.fillStyle = axisTextColor;
   ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
   const freqTicks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
   for (const f of freqTicks) {
@@ -866,7 +869,7 @@ function drawDecayHeatmap(ctx, plot, decay) {
   for (let i = 0; i <= 6; i++) gradient.addColorStop(i / 6, decayColor(-60 + i * 10));
   ctx.fillStyle = gradient;
   ctx.fillRect(legendX, plot.y, 12, plot.h);
-  ctx.fillStyle = '#8292a8';
+  ctx.fillStyle = axisTextColor;
   ctx.textAlign = 'left';
   ctx.fillText('0', legendX + 17, plot.y + 4);
   ctx.fillText('−60', legendX + 17, plot.y + plot.h - 4);
@@ -951,9 +954,9 @@ function makeAxis(series) {
   return { type: 'linear-time', xMin: -5, xMax, yMin: -80, yMax: 0, yLabel: 'ETC dB' };
 }
 
-function drawAxes(ctx, plot, axis) {
-  ctx.strokeStyle = '#26364d';
-  ctx.fillStyle = '#8292a8';
+function drawAxes(ctx, plot, axis, theme = null) {
+  ctx.strokeStyle = theme?.grid || '#26364d';
+  ctx.fillStyle = theme?.axisText || '#8292a8';
   ctx.lineWidth = 1;
   ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textBaseline = 'middle';
@@ -992,7 +995,7 @@ function drawAxes(ctx, plot, axis) {
   }
   ctx.textAlign = 'left';
   ctx.fillText(axis.yLabel, 8, plot.y - 10);
-  ctx.strokeStyle = '#4b607d';
+  ctx.strokeStyle = theme?.border || '#4b607d';
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 }
 
@@ -1205,26 +1208,24 @@ function renderReportSummaryPage(pageNumber, totalPages) {
   const quality = assessMeasurementQuality(result);
   const warnings = getMeasurementWarnings(result);
 
-  const background = ctx.createLinearGradient(0, 0, REPORT_PAGE_WIDTH, REPORT_PAGE_HEIGHT);
-  background.addColorStop(0, '#07101e');
-  background.addColorStop(1, '#020713');
-  ctx.fillStyle = background;
+  // PDFレポートは印刷を前提に白背景で描画する。
+  ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, REPORT_PAGE_WIDTH, REPORT_PAGE_HEIGHT);
 
-  ctx.fillStyle = '#38bdf8';
+  ctx.fillStyle = '#0369a1';
   ctx.font = '700 18px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText('SPEAKER ACOUSTIC MEASUREMENT REPORT', 54, 48);
-  ctx.fillStyle = '#f8fafc';
+  ctx.fillStyle = '#111827';
   ctx.font = '800 38px -apple-system, BlinkMacSystemFont, sans-serif';
   drawFittedText(ctx, result.name || 'Speaker measurement', 54, 95, 960, 38, 25);
-  ctx.fillStyle = '#93a4ba';
+  ctx.fillStyle = '#475569';
   ctx.font = '18px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.fillText(`${new Date(result.createdAt).toLocaleString('ja-JP')}  /  Speaker Measure Pro ${VERSION}`, 56, 126);
 
-  const qualityColors = { good: '#4ade80', warn: '#facc15', bad: '#fb7185', neutral: '#93a4ba' };
+  const qualityColors = { good: '#15803d', warn: '#a16207', bad: '#b91c1c', neutral: '#4b5563' };
   const badgeWidth = 190;
-  ctx.fillStyle = 'rgba(7, 16, 30, 0.92)';
+  ctx.fillStyle = '#ffffff';
   ctx.strokeStyle = qualityColors[quality.level] || qualityColors.neutral;
   ctx.lineWidth = 2;
   ctx.fillRect(REPORT_PAGE_WIDTH - badgeWidth - 54, 61, badgeWidth, 54);
@@ -1274,17 +1275,17 @@ function renderReportSummaryPage(pageNumber, totalPages) {
   drawReportPanel(ctx, 48, 160, 636, 548, '測定条件', settings, 2);
   drawReportPanel(ctx, 716, 160, 636, 548, '解析概要', results, 2);
 
-  ctx.fillStyle = 'rgba(7, 16, 30, 0.90)';
-  ctx.strokeStyle = warnings.length ? 'rgba(250, 204, 21, 0.55)' : 'rgba(74, 222, 128, 0.42)';
+  ctx.fillStyle = warnings.length ? '#fffbeb' : '#f0fdf4';
+  ctx.strokeStyle = warnings.length ? '#d97706' : '#16a34a';
   ctx.lineWidth = 1.5;
   ctx.fillRect(48, 734, 1304, 184);
   ctx.strokeRect(48, 734, 1304, 184);
-  ctx.fillStyle = warnings.length ? '#fde68a' : '#bbf7d0';
+  ctx.fillStyle = warnings.length ? '#92400e' : '#166534';
   ctx.font = '700 21px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText(warnings.length ? '測定上の注意' : '測定品質', 72, 770);
   const noteLines = warnings.length ? warnings : ['解析上の重大な警告は検出されていません。グラフの信頼帯域外、測定環境、マイク特性を考慮して評価してください。'];
-  ctx.fillStyle = '#dbe7f4';
+  ctx.fillStyle = '#1f2937';
   ctx.font = '17px -apple-system, BlinkMacSystemFont, sans-serif';
   let noteY = 805;
   for (const note of noteLines.slice(0, 4)) {
@@ -1302,16 +1303,16 @@ function renderReportSummaryPage(pageNumber, totalPages) {
 }
 
 function drawReportPanel(ctx, x, y, width, height, title, items, columns = 2) {
-  ctx.fillStyle = 'rgba(7, 16, 30, 0.88)';
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+  ctx.fillStyle = '#f8fafc';
+  ctx.strokeStyle = '#cbd5e1';
   ctx.lineWidth = 1.5;
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
-  ctx.fillStyle = '#f8fafc';
+  ctx.fillStyle = '#111827';
   ctx.font = '700 24px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText(title, x + 24, y + 39);
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.38)';
+  ctx.strokeStyle = '#7dd3fc';
   ctx.beginPath();
   ctx.moveTo(x + 24, y + 56);
   ctx.lineTo(x + width - 24, y + 56);
@@ -1327,10 +1328,10 @@ function drawReportPanel(ctx, x, y, width, height, title, items, columns = 2) {
     const itemX = x + 24 + column * columnWidth;
     const itemY = y + 86 + row * rowHeight;
     const [label, value] = items[index];
-    ctx.fillStyle = '#93a4ba';
+    ctx.fillStyle = '#475569';
     ctx.font = '15px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillText(label, itemX, itemY);
-    ctx.fillStyle = '#edf4fc';
+    ctx.fillStyle = '#0f172a';
     ctx.font = '600 18px -apple-system, BlinkMacSystemFont, sans-serif';
     drawFittedText(ctx, value, itemX, itemY + 23, columnWidth - 20, 18, 12);
   }
@@ -1375,7 +1376,7 @@ function renderReportGraphPage(view, pageNumber, totalPages) {
   canvas.width = REPORT_PAGE_WIDTH;
   canvas.height = REPORT_PAGE_HEIGHT;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#020713';
+  ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const graphCanvas = document.createElement('canvas');
@@ -1391,7 +1392,7 @@ function renderReportGraphPage(view, pageNumber, totalPages) {
     if (Number.isFinite(currentResult?.config?.startFreq)) ui.startFreq.value = String(currentResult.config.startFreq);
     if (Number.isFinite(currentResult?.config?.endFreq)) ui.endFreq.value = String(currentResult.config.endFreq);
     const series = collectSeries();
-    renderExportGraph(graphCtx, 1000, 720, series);
+    renderExportGraph(graphCtx, 1000, 720, series, { printMode: true });
   } finally {
     currentView = previousView;
     ui.startFreq.value = previousStartFreq;
@@ -1410,11 +1411,11 @@ function drawReportPageNumber(ctx, pageNumber, totalPages) {
   const boxHeight = 36;
   const x = REPORT_PAGE_WIDTH - boxWidth - 22;
   const y = REPORT_PAGE_HEIGHT - boxHeight - 18;
-  ctx.fillStyle = 'rgba(2, 7, 19, 0.84)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.94)';
   ctx.fillRect(x, y, boxWidth, boxHeight);
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+  ctx.strokeStyle = '#cbd5e1';
   ctx.strokeRect(x, y, boxWidth, boxHeight);
-  ctx.fillStyle = '#a9b8ca';
+  ctx.fillStyle = '#475569';
   ctx.font = '600 16px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(`${pageNumber} / ${totalPages}`, x + boxWidth / 2, y + 24);
@@ -1488,23 +1489,50 @@ function exportGraphPng() {
   }
 }
 
-function renderExportGraph(ctx, width, height, series) {
-  ctx.fillStyle = '#020713';
+function renderExportGraph(ctx, width, height, series, options = {}) {
+  const printMode = options.printMode === true;
+  const theme = printMode ? {
+    background: '#ffffff',
+    text: '#111827',
+    muted: '#475569',
+    footer: '#64748b',
+    grid: '#d1d5db',
+    border: '#6b7280',
+    axisText: '#374151',
+    decayGrid: 'rgba(55, 65, 81, 0.22)',
+    unreliableFill: 'rgba(190, 24, 93, 0.08)'
+  } : {
+    background: '#020713',
+    text: '#f8fafc',
+    muted: '#9fb0c7',
+    footer: '#73849c',
+    grid: '#26364d',
+    border: '#4b607d',
+    axisText: '#8292a8',
+    decayGrid: 'rgba(130,146,168,0.35)',
+    unreliableFill: 'rgba(251, 113, 133, 0.10)'
+  };
+
+  const exportSeries = printMode
+    ? series.map((item) => ({ ...item, color: printSeriesColor(item.color) }))
+    : series;
+
+  ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
-  const title = currentResult?.name || series[0]?.name || 'Speaker measurement';
-  ctx.fillStyle = '#f8fafc';
+  const title = currentResult?.name || exportSeries[0]?.name || 'Speaker measurement';
+  ctx.fillStyle = theme.text;
   ctx.font = '700 26px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(title, 56, 48);
 
-  ctx.fillStyle = '#9fb0c7';
+  ctx.fillStyle = theme.muted;
   ctx.font = '15px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.fillText(VIEW_LABELS[currentView], 56, 76);
 
   const metaParts = [];
-  const sourceResult = currentResult || series[0]?.result;
+  const sourceResult = currentResult || exportSeries[0]?.result;
   if (sourceResult?.createdAt) metaParts.push(new Date(sourceResult.createdAt).toLocaleString('ja-JP'));
   if (sourceResult?.config?.distanceCm != null) metaParts.push(`距離 ${sourceResult.config.distanceCm} cm`);
   if (sourceResult?.config?.speakerType) metaParts.push(sourceResult.config.speakerType);
@@ -1516,22 +1544,38 @@ function renderExportGraph(ctx, width, height, series) {
 
   const plot = { x: 76, y: 126, w: width - (currentView === 'decay' ? 150 : 112), h: 466 };
   if (currentView === 'decay') {
-    drawDecayHeatmap(ctx, plot, sourceResult?.decay);
+    drawDecayHeatmap(ctx, plot, sourceResult?.decay, theme);
   } else {
-    const axis = makeAxis(series);
-    drawAxes(ctx, plot, axis);
-    drawReliabilityShading(ctx, plot, axis);
-    for (const item of series) drawSeries(ctx, plot, axis, item);
-    drawExportLegend(ctx, series, 76, 622, width - 112);
+    const axis = makeAxis(exportSeries);
+    drawAxes(ctx, plot, axis, theme);
+    drawReliabilityShading(ctx, plot, axis, theme);
+    for (const item of exportSeries) drawSeries(ctx, plot, axis, item);
+    drawExportLegend(ctx, exportSeries, 76, 622, width - 112, theme);
   }
 
-  ctx.fillStyle = '#73849c';
+  ctx.fillStyle = theme.footer;
   ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'right';
   ctx.fillText(`Speaker Measure Pro ${VERSION}`, width - 56, height - 24);
 }
 
-function drawExportLegend(ctx, series, startX, startY, maxWidth) {
+function printSeriesColor(color) {
+  const normalized = String(color || '').toLowerCase();
+  const replacements = {
+    '#f8fafc': '#111827',
+    '#38bdf8': '#0369a1',
+    '#a3e635': '#4d7c0f',
+    '#facc15': '#a16207',
+    '#c084fc': '#7e22ce',
+    '#fb7185': '#be123c',
+    '#2dd4bf': '#0f766e',
+    '#f97316': '#c2410c',
+    '#818cf8': '#4338ca'
+  };
+  return replacements[normalized] || color || '#111827';
+}
+
+function drawExportLegend(ctx, series, startX, startY, maxWidth, theme = null) {
   ctx.font = '14px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textBaseline = 'middle';
   let x = startX;
@@ -1549,7 +1593,7 @@ function drawExportLegend(ctx, series, startX, startY, maxWidth) {
     ctx.moveTo(x, y);
     ctx.lineTo(x + 20, y);
     ctx.stroke();
-    ctx.fillStyle = '#dbe7f5';
+    ctx.fillStyle = theme?.text || '#dbe7f5';
     ctx.textAlign = 'left';
     ctx.fillText(label, x + 28, y);
     x += itemWidth;
